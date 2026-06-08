@@ -1,0 +1,835 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+const CLUBS = [
+  { id: "driver", label: "Driver", abbr: "Dr", color: "#c8a96e" },
+  { id: "3w", label: "3 Wood", abbr: "3W", color: "#b8956a" },
+  { id: "5w", label: "5 Wood", abbr: "5W", color: "#a88266" },
+  { id: "4h", label: "4 Hybrid", abbr: "4H", color: "#8fb3a8" },
+  { id: "4i", label: "4 Iron", abbr: "4i", color: "#7a9e93" },
+  { id: "5i", label: "5 Iron", abbr: "5i", color: "#6a8e83" },
+  { id: "6i", label: "6 Iron", abbr: "6i", color: "#5a7e73" },
+  { id: "7i", label: "7 Iron", abbr: "7i", color: "#4a6e63" },
+  { id: "8i", label: "8 Iron", abbr: "8i", color: "#3a5e53" },
+  { id: "9i", label: "9 Iron", abbr: "9i", color: "#2a4e43" },
+  { id: "pw", label: "Pitching Wedge", abbr: "PW", color: "#c45c3b" },
+  { id: "gw", label: "Gap Wedge", abbr: "GW", color: "#b84c2b" },
+  { id: "sw", label: "Sand Wedge", abbr: "SW", color: "#ac3c1b" },
+  { id: "lw", label: "Lob Wedge", abbr: "LW", color: "#a02c0b" },
+  { id: "putter", label: "Putter", abbr: "Pt", color: "#888" },
+];
+
+const SHOT_RESULTS = ["Fairway", "Green", "Rough", "Bunker", "Penalty", "OB"];
+const SHOT_SHAPES = ["Straight", "Draw", "Fade", "Hook", "Slice", "Push", "Pull"];
+
+const SAMPLE_COURSES = [
+  { id: 6, name: "River Pines — Black", rating: 71.1, slope: 132, par: 70, location: "Johns Creek, GA", yards: 6602 },
+  { id: 7, name: "River Pines — Blue", rating: 69.4, slope: 127, par: 70, location: "Johns Creek, GA", yards: 6284 },
+  { id: 8, name: "River Pines — River", rating: 68.1, slope: 122, par: 70, location: "Johns Creek, GA", yards: 6037 },
+  { id: 9, name: "River Pines — White", rating: 71.0, slope: 114, par: 70, location: "Johns Creek, GA", yards: 5785 },
+  { id: 10, name: "River Pines — Silver", rating: 70.0, slope: 112, par: 70, location: "Johns Creek, GA", yards: 5193 },
+  { id: 1, name: "Augusta National", rating: 76.2, slope: 148, par: 72 },
+  { id: 2, name: "Pebble Beach GL", rating: 75.5, slope: 145, par: 72 },
+  { id: 3, name: "TPC Sawgrass", rating: 76.8, slope: 155, par: 72 },
+  { id: 4, name: "Pinehurst No. 2", rating: 75.4, slope: 143, par: 70 },
+  { id: 5, name: "Torrey Pines South", rating: 78.4, slope: 144, par: 72 },
+];
+
+const INITIAL_ROUND = {
+  course: null,
+  date: new Date().toISOString().split("T")[0],
+  tee: "White",
+  holes: Array.from({ length: 18 }, (_, i) => ({
+    number: i + 1,
+    par: i < 9 ? [4, 3, 5, 4, 4, 3, 4, 5, 4][i] : [4, 3, 5, 4, 4, 3, 4, 5, 4][i - 9],
+    shots: [],
+    score: null,
+    putts: 0,
+  })),
+};
+
+// Haversine formula — returns distance in yards between two lat/lng coords
+function haversineYards(lat1, lon1, lat2, lon2) {
+  const R = 6371000; // meters
+  const φ1 = (lat1 * Math.PI) / 180;
+  const φ2 = (lat2 * Math.PI) / 180;
+  const Δφ = ((lat2 - lat1) * Math.PI) / 180;
+  const Δλ = ((lon2 - lon1) * Math.PI) / 180;
+  const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+  const meters = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(meters * 1.09361);
+}
+
+// GPS Hook — tracks position continuously while active
+function useGPS() {
+  const [pos, setPos] = useState(null);
+  const [error, setError] = useState(null);
+  const [watching, setWatching] = useState(false);
+  const watchId = useRef(null);
+
+  const startWatch = useCallback(() => {
+    if (!navigator.geolocation) {
+      setError("GPS not available on this device.");
+      return;
+    }
+    setError(null);
+    setWatching(true);
+    watchId.current = navigator.geolocation.watchPosition(
+      (p) => setPos({ lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy) }),
+      (e) => setError(e.message),
+      { enableHighAccuracy: true, maximumAge: 2000, timeout: 10000 }
+    );
+  }, []);
+
+  const stopWatch = useCallback(() => {
+    if (watchId.current !== null) navigator.geolocation.clearWatch(watchId.current);
+    setWatching(false);
+  }, []);
+
+  const getOnce = useCallback(() => new Promise((resolve, reject) => {
+    if (!navigator.geolocation) { reject(new Error("GPS not available")); return; }
+    navigator.geolocation.getCurrentPosition(
+      (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy) }),
+      reject,
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 12000 }
+    );
+  }), []);
+
+  useEffect(() => () => { if (watchId.current !== null) navigator.geolocation.clearWatch(watchId.current); }, []);
+
+  return { pos, error, watching, startWatch, stopWatch, getOnce };
+}
+
+// GPS Shot Distance Widget — embedded in the shot modal
+function GPSDistanceCapture({ onDistanceCaptured }) {
+  const { pos, error, watching, startWatch, stopWatch, getOnce } = useGPS();
+  const [phase, setPhase] = useState("idle"); // idle | waiting-start | start-set | waiting-end | done
+  const [startCoord, setStartCoord] = useState(null);
+  const [endCoord, setEndCoord] = useState(null);
+  const [measuredYards, setMeasuredYards] = useState(null);
+  const [gpsLoading, setGpsLoading] = useState(false);
+  const [accuracyWarning, setAccuracyWarning] = useState(false);
+
+  const pinStart = async () => {
+    setGpsLoading(true);
+    setAccuracyWarning(false);
+    try {
+      const coord = await getOnce();
+      if (coord.acc > 15) setAccuracyWarning(true);
+      setStartCoord(coord);
+      setPhase("start-set");
+    } catch (e) {
+      console.error(e);
+    }
+    setGpsLoading(false);
+  };
+
+  const pinEnd = async () => {
+    setGpsLoading(true);
+    setAccuracyWarning(false);
+    try {
+      const coord = await getOnce();
+      if (coord.acc > 15) setAccuracyWarning(true);
+      setEndCoord(coord);
+      const yards = haversineYards(startCoord.lat, startCoord.lng, coord.lat, coord.lng);
+      setMeasuredYards(yards);
+      setPhase("done");
+      onDistanceCaptured(yards);
+    } catch (e) {
+      console.error(e);
+    }
+    setGpsLoading(false);
+  };
+
+  const reset = () => {
+    setPhase("idle");
+    setStartCoord(null);
+    setEndCoord(null);
+    setMeasuredYards(null);
+    setAccuracyWarning(false);
+  };
+
+  return (
+    <div style={gpsStyles.wrap}>
+      <div style={gpsStyles.header}>
+        <span style={gpsStyles.icon}>📡</span>
+        <span style={gpsStyles.title}>GPS Distance</span>
+        {phase === "done" && measuredYards && (
+          <span style={gpsStyles.badge}>{measuredYards}y</span>
+        )}
+      </div>
+
+      {error && <div style={gpsStyles.error}>⚠ {error}</div>}
+
+      {phase === "idle" && (
+        <div style={gpsStyles.steps}>
+          <div style={gpsStyles.stepInactive}>① Stand at ball address position</div>
+          <div style={gpsStyles.stepInactive}>② Pin Start → hit your shot → walk to ball</div>
+          <div style={gpsStyles.stepInactive}>③ Pin End → distance auto-calculates</div>
+          <button style={gpsStyles.btn} onClick={pinStart} disabled={gpsLoading}>
+            {gpsLoading ? "Getting GPS…" : "📍 Pin Start"}
+          </button>
+        </div>
+      )}
+
+      {phase === "start-set" && (
+        <div style={gpsStyles.steps}>
+          {accuracyWarning && <div style={gpsStyles.warn}>Low accuracy ({startCoord?.acc}m). Move to open sky.</div>}
+          <div style={gpsStyles.stepDone}>✓ Start pinned ({startCoord?.acc}m accuracy)</div>
+          <div style={gpsStyles.stepActive}>Now hit your shot, then walk to where the ball lands</div>
+          <button style={gpsStyles.btn} onClick={pinEnd} disabled={gpsLoading}>
+            {gpsLoading ? "Getting GPS…" : "🏌️ Pin End (Ball Landed)"}
+          </button>
+        </div>
+      )}
+
+      {phase === "done" && (
+        <div style={gpsStyles.result}>
+          <div style={gpsStyles.yardsBig}>{measuredYards}</div>
+          <div style={gpsStyles.yardsLabel}>YARDS</div>
+          {accuracyWarning && <div style={gpsStyles.warn}>Low accuracy reading — verify manually</div>}
+          <div style={gpsStyles.coordSmall}>
+            Start: {startCoord?.lat.toFixed(5)}, {startCoord?.lng.toFixed(5)}<br />
+            End: {endCoord?.lat.toFixed(5)}, {endCoord?.lng.toFixed(5)}
+          </div>
+          <button style={gpsStyles.resetBtn} onClick={reset}>Re-measure</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const gpsStyles = {
+  wrap: { background: "#0a1220", border: "1px solid #c8a96e55", borderRadius: 10, padding: "14px 16px", marginTop: 4 },
+  header: { display: "flex", alignItems: "center", gap: 8, marginBottom: 12 },
+  icon: { fontSize: 16 },
+  title: { fontSize: 12, letterSpacing: 2, color: "#c8a96e", textTransform: "uppercase", flex: 1 },
+  badge: { background: "#c8a96e", color: "#1a0f05", fontWeight: 800, fontSize: 13, padding: "2px 8px", borderRadius: 12 },
+  steps: { display: "flex", flexDirection: "column", gap: 6 },
+  stepInactive: { fontSize: 12, color: "#555", paddingLeft: 4 },
+  stepDone: { fontSize: 12, color: "#4caf80", paddingLeft: 4 },
+  stepActive: { fontSize: 12, color: "#e8e0d0", paddingLeft: 4, marginBottom: 4 },
+  btn: { background: "#c8a96e", border: "none", borderRadius: 8, padding: "10px 0", color: "#1a0f05", fontWeight: 700, fontSize: 13, cursor: "pointer", marginTop: 6 },
+  result: { textAlign: "center" },
+  yardsBig: { fontSize: 56, fontWeight: 900, color: "#c8a96e", lineHeight: 1 },
+  yardsLabel: { fontSize: 11, letterSpacing: 4, color: "#888", marginBottom: 8 },
+  coordSmall: { fontSize: 10, color: "#444", margin: "8px 0", lineHeight: 1.6 },
+  resetBtn: { background: "none", border: "1px solid #444", color: "#888", borderRadius: 6, padding: "6px 14px", fontSize: 12, cursor: "pointer", marginTop: 4 },
+  error: { color: "#e05c4b", fontSize: 12, marginBottom: 8 },
+  warn: { background: "#3a2000", color: "#f5a623", fontSize: 11, padding: "6px 10px", borderRadius: 6, marginBottom: 6 },
+};
+
+export default function GolfTracker() {
+  const [view, setView] = useState("home");
+  const [rounds, setRounds] = useState([]);
+  const [activeRound, setActiveRound] = useState(null);
+  const [activeHole, setActiveHole] = useState(0);
+  const [showShotModal, setShowShotModal] = useState(false);
+  const [pendingShot, setPendingShot] = useState({ club: null, distance: "", result: "Fairway", shape: "Straight", notes: "", gpsDistance: null });
+  const [handicapIndex, setHandicapIndex] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [aiInsight, setAiInsight] = useState("");
+  const [showCourseSelect, setShowCourseSelect] = useState(false);
+  const [gpsTab, setGpsTab] = useState("gps"); // gps | manual
+
+  useEffect(() => {
+    if (rounds.length === 0) return;
+    const diffs = rounds
+      .filter(r => r.completed && r.course)
+      .map(r => {
+        const total = r.holes.reduce((s, h) => s + (h.score || h.par), 0);
+        const adj = Math.min(total, r.holes.reduce((s, h) => s + h.par + 3, 0));
+        return ((adj - r.course.rating) * 113) / r.course.slope;
+      });
+    if (diffs.length === 0) return;
+    const sorted = [...diffs].sort((a, b) => a - b);
+    const useCount = Math.min(Math.floor(diffs.length * 0.4) + 1, 8);
+    const best = sorted.slice(0, useCount);
+    const avg = best.reduce((s, d) => s + d, 0) / best.length;
+    setHandicapIndex(Math.floor(avg * 10) / 10);
+  }, [rounds]);
+
+  const startRound = (course) => {
+    const round = { ...JSON.parse(JSON.stringify(INITIAL_ROUND)), id: Date.now(), course, completed: false };
+    setActiveRound(round);
+    setActiveHole(0);
+    setShowCourseSelect(false);
+    setView("round");
+  };
+
+  const openShotModal = () => {
+    setPendingShot({ club: null, distance: "", result: "Fairway", shape: "Straight", notes: "", gpsDistance: null });
+    setGpsTab("gps");
+    setShowShotModal(true);
+  };
+
+  const addShot = () => {
+    if (!pendingShot.club) return;
+    const dist = pendingShot.gpsDistance || pendingShot.distance;
+    const shot = { ...pendingShot, distance: String(dist), id: Date.now() };
+    const updated = JSON.parse(JSON.stringify(activeRound));
+    updated.holes[activeHole].shots.push(shot);
+    setActiveRound(updated);
+    setShowShotModal(false);
+  };
+
+  const updateScore = (holeIdx, score) => {
+    const updated = JSON.parse(JSON.stringify(activeRound));
+    updated.holes[holeIdx].score = parseInt(score) || null;
+    setActiveRound(updated);
+  };
+
+  const updatePutts = (holeIdx, putts) => {
+    const updated = JSON.parse(JSON.stringify(activeRound));
+    updated.holes[holeIdx].putts = parseInt(putts) || 0;
+    setActiveRound(updated);
+  };
+
+  const finishRound = () => {
+    const completed = { ...activeRound, completed: true };
+    setRounds(prev => [completed, ...prev]);
+    setActiveRound(null);
+    setView("scorecard-view");
+    fetchAiInsight(completed);
+  };
+
+  const fetchAiInsight = async (round) => {
+    setLoading(true);
+    setAiInsight("");
+    try {
+      const totalScore = round.holes.reduce((s, h) => s + (h.score || h.par), 0);
+      const totalPar = round.holes.reduce((s, h) => s + h.par, 0);
+      const clubUsage = {};
+      round.holes.forEach(h => h.shots.forEach(s => { clubUsage[s.club] = (clubUsage[s.club] || 0) + 1; }));
+      const shotResults = {};
+      round.holes.forEach(h => h.shots.forEach(s => { shotResults[s.result] = (shotResults[s.result] || 0) + 1; }));
+      const gpsShots = round.holes.flatMap(h => h.shots.filter(s => s.gpsDistance));
+      const avgGpsByClub = {};
+      gpsShots.forEach(s => {
+        if (!avgGpsByClub[s.club]) avgGpsByClub[s.club] = [];
+        avgGpsByClub[s.club].push(s.gpsDistance);
+      });
+      const gpsAvgs = Object.entries(avgGpsByClub).map(([c, ds]) => `${c}: ${Math.round(ds.reduce((a,b)=>a+b,0)/ds.length)}y`).join(", ");
+
+      const prompt = `You are a golf coach reviewing a round. Give 3 sharp, specific insights and 1 practice drill. Be direct, no fluff.
+
+Round data:
+- Course: ${round.course?.name}
+- Score: ${totalScore} (${totalScore > totalPar ? "+" : ""}${totalScore - totalPar})
+- Club frequency: ${JSON.stringify(clubUsage)}
+- Shot results: ${JSON.stringify(shotResults)}
+- GPS-measured avg distances: ${gpsAvgs || "none recorded"}
+
+Format: 3 bullet insights + 1 "Drill:" paragraph.`;
+
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
+      });
+      const data = await res.json();
+      const text = data.content?.filter(b => b.type === "text").map(b => b.text).join("") || "";
+      setAiInsight(text);
+    } catch (e) {
+      setAiInsight("Unable to load AI insights right now.");
+    }
+    setLoading(false);
+  };
+
+  const totalScore = activeRound ? activeRound.holes.reduce((s, h) => s + (h.score || 0), 0) : 0;
+  const totalPar = activeRound ? activeRound.holes.reduce((s, h) => s + h.par, 0) : 0;
+  const scoreDiff = totalScore - totalPar;
+
+  return (
+    <div style={styles.app}>
+      <header style={styles.header}>
+        <div style={styles.headerLeft}>
+          <div style={styles.logo}>⛳</div>
+          <div>
+            <div style={styles.logoText}>CADDIE</div>
+            <div style={styles.logoSub}>USGA · GPS Connected</div>
+          </div>
+        </div>
+        {handicapIndex !== null && (
+          <div style={styles.hcapBadge}>
+            <div style={styles.hcapLabel}>HCP</div>
+            <div style={styles.hcapValue}>{handicapIndex.toFixed(1)}</div>
+          </div>
+        )}
+      </header>
+
+      <nav style={styles.nav}>
+        {["home", "stats", "handicap"].map(v => (
+          <button key={v}
+            style={{ ...styles.navBtn, ...(view === v || (view === "scorecard-view" && v === "home") ? styles.navBtnActive : {}) }}
+            onClick={() => setView(v)}>
+            {v === "home" ? "Rounds" : v === "stats" ? "My Bag" : "Handicap"}
+          </button>
+        ))}
+      </nav>
+
+      <main style={styles.main}>
+        {/* HOME */}
+        {(view === "home" || view === "scorecard-view") && !activeRound && (
+          <div>
+            <div style={styles.sectionHeader}>
+              <span style={styles.sectionTitle}>Recent Rounds</span>
+              <button style={styles.newRoundBtn} onClick={() => setShowCourseSelect(true)}>+ New Round</button>
+            </div>
+            {rounds.length === 0 && (
+              <div style={styles.emptyState}>
+                <div style={styles.emptyIcon}>🏌️</div>
+                <div style={styles.emptyText}>No rounds yet. Start tracking to build your handicap.</div>
+              </div>
+            )}
+            {rounds.map(r => {
+              const total = r.holes.reduce((s, h) => s + (h.score || h.par), 0);
+              const par = r.holes.reduce((s, h) => s + h.par, 0);
+              const diff = total - par;
+              return (
+                <div key={r.id} style={styles.roundCard}>
+                  <div>
+                    <div style={styles.roundCourse}>{r.course?.name || "Unknown Course"}</div>
+                    <div style={styles.roundDate}>{r.date}</div>
+                  </div>
+                  <div style={styles.roundCardRight}>
+                    <div style={styles.roundScore}>{total}</div>
+                    <div style={{ ...styles.roundDiff, color: diff > 0 ? "#e05c4b" : diff < 0 ? "#4caf80" : "#aaa" }}>
+                      {diff > 0 ? `+${diff}` : diff === 0 ? "E" : diff}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+            {view === "scorecard-view" && rounds[0] && (
+              <ScorecardView round={rounds[0]} aiInsight={aiInsight} loading={loading} />
+            )}
+          </div>
+        )}
+
+        {/* ACTIVE ROUND */}
+        {view === "round" && activeRound && (
+          <div>
+            <div style={styles.roundHeader}>
+              <div>
+                <div style={styles.courseName}>{activeRound.course?.name}</div>
+                <div style={styles.holeLabel}>Hole {activeHole + 1} · Par {activeRound.holes[activeHole].par}</div>
+              </div>
+              <div style={styles.liveScore}>
+                <div style={styles.liveScoreNum}>{totalScore || "—"}</div>
+                <div style={{ ...styles.liveScoreDiff, color: scoreDiff > 0 ? "#e05c4b" : scoreDiff < 0 ? "#4caf80" : "#aaa" }}>
+                  {totalScore ? (scoreDiff > 0 ? `+${scoreDiff}` : scoreDiff === 0 ? "E" : scoreDiff) : ""}
+                </div>
+              </div>
+            </div>
+
+            <div style={styles.holeRow}>
+              {activeRound.holes.map((h, i) => (
+                <button key={i}
+                  style={{ ...styles.holeBtn, ...(i === activeHole ? styles.holeBtnActive : {}), ...(h.score ? styles.holeBtnDone : {}) }}
+                  onClick={() => setActiveHole(i)}>
+                  {i + 1}
+                </button>
+              ))}
+            </div>
+
+            <div style={styles.scoreRow}>
+              <div style={styles.scoreBlock}>
+                <div style={styles.scoreBlockLabel}>Score</div>
+                <input type="number" min="1" max="15"
+                  value={activeRound.holes[activeHole].score || ""}
+                  onChange={e => updateScore(activeHole, e.target.value)}
+                  style={styles.scoreInput} placeholder="—" />
+              </div>
+              <div style={styles.scoreBlock}>
+                <div style={styles.scoreBlockLabel}>Putts</div>
+                <input type="number" min="0" max="6"
+                  value={activeRound.holes[activeHole].putts || ""}
+                  onChange={e => updatePutts(activeHole, e.target.value)}
+                  style={styles.scoreInput} placeholder="—" />
+              </div>
+            </div>
+
+            <div style={styles.shotsSection}>
+              <div style={styles.shotsSectionHeader}>
+                <span style={styles.shotsSectionTitle}>Shots ({activeRound.holes[activeHole].shots.length})</span>
+                <button style={styles.addShotBtn} onClick={openShotModal}>+ Log Shot</button>
+              </div>
+              {activeRound.holes[activeHole].shots.map(s => (
+                <div key={s.id} style={styles.shotRow}>
+                  <div style={{ ...styles.shotClubBadge, background: CLUBS.find(c => c.id === s.club)?.color || "#555" }}>
+                    {CLUBS.find(c => c.id === s.club)?.abbr}
+                  </div>
+                  <div style={styles.shotInfo}>
+                    <span style={styles.shotShape}>{s.shape}</span>
+                    <span style={styles.shotResult}>{s.result}</span>
+                    {s.distance && (
+                      <span style={{ ...styles.shotDist, ...(s.gpsDistance ? styles.shotDistGps : {}) }}>
+                        {s.distance}y{s.gpsDistance ? " 📡" : ""}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div style={styles.holeNav}>
+              <button style={styles.holeNavBtn} disabled={activeHole === 0} onClick={() => setActiveHole(h => h - 1)}>← Prev</button>
+              {activeHole < 17
+                ? <button style={styles.holeNavBtnNext} onClick={() => setActiveHole(h => h + 1)}>Next Hole →</button>
+                : <button style={{ ...styles.holeNavBtnNext, background: "#4caf80" }} onClick={finishRound}>Finish Round ✓</button>}
+            </div>
+          </div>
+        )}
+
+        {view === "stats" && <BagStats rounds={rounds} />}
+        {view === "handicap" && <HandicapView rounds={rounds} handicapIndex={handicapIndex} />}
+      </main>
+
+      {/* Course Select Modal */}
+      {showCourseSelect && (
+        <div style={styles.modalOverlay} onClick={() => setShowCourseSelect(false)}>
+          <div style={styles.modal} onClick={e => e.stopPropagation()}>
+            <div style={styles.modalTitle}>Select Course</div>
+            {SAMPLE_COURSES.map(c => (
+              <button key={c.id} style={styles.courseItem} onClick={() => startRound(c)}>
+                <div style={styles.courseItemName}>{c.name}</div>
+                <div style={styles.courseItemMeta}>
+                  {c.location ? `${c.location} · ` : ""}{c.yards ? `${c.yards}y · ` : ""}Rating {c.rating} · Slope {c.slope} · Par {c.par}
+                </div>
+              </button>
+            ))}
+            <button style={styles.cancelBtn} onClick={() => setShowCourseSelect(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* Shot Log Modal */}
+      {showShotModal && (
+        <div style={styles.modalOverlay} onClick={() => setShowShotModal(false)}>
+          <div style={styles.modal} onClick={e => e.stopPropagation()}>
+            <div style={styles.modalTitle}>Log Shot</div>
+
+            <div style={styles.fieldLabel}>Club</div>
+            <div style={styles.clubGrid}>
+              {CLUBS.map(c => (
+                <button key={c.id}
+                  style={{ ...styles.clubChip, ...(pendingShot.club === c.id ? { background: c.color, color: "#fff" } : {}) }}
+                  onClick={() => setPendingShot(p => ({ ...p, club: c.id }))}>
+                  {c.abbr}
+                </button>
+              ))}
+            </div>
+
+            {/* Distance — GPS or Manual tabs */}
+            <div style={styles.fieldLabel}>Distance</div>
+            <div style={styles.tabRow}>
+              <button style={{ ...styles.tab, ...(gpsTab === "gps" ? styles.tabActive : {}) }} onClick={() => setGpsTab("gps")}>📡 GPS</button>
+              <button style={{ ...styles.tab, ...(gpsTab === "manual" ? styles.tabActive : {}) }} onClick={() => setGpsTab("manual")}>✏️ Manual</button>
+            </div>
+
+            {gpsTab === "gps" && (
+              <GPSDistanceCapture
+                onDistanceCaptured={(yards) => setPendingShot(p => ({ ...p, gpsDistance: yards, distance: String(yards) }))}
+              />
+            )}
+            {gpsTab === "manual" && (
+              <input type="number" style={styles.fieldInput} placeholder="e.g. 285 yards"
+                value={pendingShot.distance}
+                onChange={e => setPendingShot(p => ({ ...p, distance: e.target.value, gpsDistance: null }))} />
+            )}
+
+            <div style={styles.fieldLabel}>Result</div>
+            <div style={styles.chipRow}>
+              {SHOT_RESULTS.map(r => (
+                <button key={r}
+                  style={{ ...styles.chip, ...(pendingShot.result === r ? styles.chipActive : {}) }}
+                  onClick={() => setPendingShot(p => ({ ...p, result: r }))}>{r}</button>
+              ))}
+            </div>
+
+            <div style={styles.fieldLabel}>Shape</div>
+            <div style={styles.chipRow}>
+              {SHOT_SHAPES.map(s => (
+                <button key={s}
+                  style={{ ...styles.chip, ...(pendingShot.shape === s ? styles.chipActive : {}) }}
+                  onClick={() => setPendingShot(p => ({ ...p, shape: s }))}>{s}</button>
+              ))}
+            </div>
+
+            <div style={styles.modalActions}>
+              <button style={styles.cancelBtn} onClick={() => setShowShotModal(false)}>Cancel</button>
+              <button style={{ ...styles.confirmBtn, opacity: pendingShot.club ? 1 : 0.4 }} onClick={addShot}>Add Shot</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ScorecardView({ round, aiInsight, loading }) {
+  const front9 = round.holes.slice(0, 9);
+  const back9 = round.holes.slice(9, 18);
+  const frontScore = front9.reduce((s, h) => s + (h.score || h.par), 0);
+  const backScore = back9.reduce((s, h) => s + (h.score || h.par), 0);
+  const total = frontScore + backScore;
+  const par = round.holes.reduce((s, h) => s + h.par, 0);
+
+  return (
+    <div style={{ marginTop: 24 }}>
+      <div style={styles.sectionTitle}>Scorecard</div>
+      <div style={styles.scorecard}>
+        <div style={styles.scorecardRow}>
+          <div style={styles.scHole}>Hole</div>
+          {front9.map(h => <div key={h.number} style={styles.scCell}>{h.number}</div>)}
+          <div style={styles.scOut}>Out</div>
+        </div>
+        <div style={styles.scorecardRow}>
+          <div style={styles.scHole}>Par</div>
+          {front9.map(h => <div key={h.number} style={styles.scCell}>{h.par}</div>)}
+          <div style={styles.scOut}>{front9.reduce((s, h) => s + h.par, 0)}</div>
+        </div>
+        <div style={{ ...styles.scorecardRow, background: "#1a2030" }}>
+          <div style={styles.scHole}>Score</div>
+          {front9.map(h => {
+            const diff = (h.score || h.par) - h.par;
+            return <div key={h.number} style={{ ...styles.scCell, color: diff < 0 ? "#4caf80" : diff > 1 ? "#e05c4b" : diff === 1 ? "#f5a623" : "#fff", fontWeight: 700 }}>{h.score || "—"}</div>;
+          })}
+          <div style={{ ...styles.scOut, fontWeight: 700 }}>{frontScore}</div>
+        </div>
+        <div style={styles.scorecardRow}>
+          <div style={styles.scHole}>Hole</div>
+          {back9.map(h => <div key={h.number} style={styles.scCell}>{h.number}</div>)}
+          <div style={styles.scOut}>In</div>
+        </div>
+        <div style={styles.scorecardRow}>
+          <div style={styles.scHole}>Par</div>
+          {back9.map(h => <div key={h.number} style={styles.scCell}>{h.par}</div>)}
+          <div style={styles.scOut}>{back9.reduce((s, h) => s + h.par, 0)}</div>
+        </div>
+        <div style={{ ...styles.scorecardRow, background: "#1a2030" }}>
+          <div style={styles.scHole}>Score</div>
+          {back9.map(h => {
+            const diff = (h.score || h.par) - h.par;
+            return <div key={h.number} style={{ ...styles.scCell, color: diff < 0 ? "#4caf80" : diff > 1 ? "#e05c4b" : diff === 1 ? "#f5a623" : "#fff", fontWeight: 700 }}>{h.score || "—"}</div>;
+          })}
+          <div style={{ ...styles.scOut, fontWeight: 700 }}>{backScore}</div>
+        </div>
+        <div style={{ ...styles.scorecardRow, background: "#0e1520", borderTop: "2px solid #c8a96e" }}>
+          <div style={{ ...styles.scHole, color: "#c8a96e" }}>Total</div>
+          <div style={{ gridColumn: "span 9", textAlign: "center", fontSize: 22, fontWeight: 800, color: "#fff", padding: "8px 0" }}>{total}</div>
+          <div style={{ ...styles.scOut, color: "#c8a96e", fontSize: 18 }}>{total - par > 0 ? `+${total - par}` : total - par === 0 ? "E" : total - par}</div>
+        </div>
+      </div>
+      <div style={styles.insightBox}>
+        <div style={styles.insightHeader}>🤖 Coach Insight</div>
+        {loading ? <div style={styles.insightLoading}>Analyzing your round…</div>
+          : aiInsight ? <div style={styles.insightText}>{aiInsight}</div>
+          : <div style={styles.insightText}>Complete a round to get AI coaching feedback.</div>}
+      </div>
+    </div>
+  );
+}
+
+function BagStats({ rounds }) {
+  const allShots = rounds.flatMap(r => r.holes.flatMap(h => h.shots));
+  const byClub = {};
+  allShots.forEach(s => {
+    if (!byClub[s.club]) byClub[s.club] = { count: 0, distances: [], gpsDistances: [], results: {} };
+    byClub[s.club].count++;
+    if (s.distance) byClub[s.club].distances.push(parseInt(s.distance));
+    if (s.gpsDistance) byClub[s.club].gpsDistances.push(s.gpsDistance);
+    byClub[s.club].results[s.result] = (byClub[s.club].results[s.result] || 0) + 1;
+  });
+
+  if (Object.keys(byClub).length === 0) return (
+    <div style={styles.emptyState}>
+      <div style={styles.emptyIcon}>🏌️</div>
+      <div style={styles.emptyText}>Log shots during a round to see your bag stats.</div>
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={styles.sectionTitle}>My Bag</div>
+      {CLUBS.filter(c => byClub[c.id]).map(c => {
+        const data = byClub[c.id];
+        const avgGps = data.gpsDistances.length > 0
+          ? Math.round(data.gpsDistances.reduce((s, d) => s + d, 0) / data.gpsDistances.length) : null;
+        const avgAll = data.distances.length > 0
+          ? Math.round(data.distances.reduce((s, d) => s + d, 0) / data.distances.length) : null;
+        const fairways = (data.results["Fairway"] || 0) + (data.results["Green"] || 0);
+        const acc = data.count > 0 ? Math.round((fairways / data.count) * 100) : 0;
+        return (
+          <div key={c.id} style={styles.bagCard}>
+            <div style={{ ...styles.bagClubDot, background: c.color }} />
+            <div style={styles.bagInfo}>
+              <div style={styles.bagClubName}>{c.label}</div>
+              <div style={styles.bagMeta}>
+                {data.count} shots
+                {avgGps ? <span style={{ color: "#c8a96e" }}> · 📡 {avgGps}y</span> : avgAll ? ` · ${avgAll}y avg` : ""}
+              </div>
+            </div>
+            <div style={styles.bagAccuracy}>
+              <div style={styles.bagAccNum}>{acc}%</div>
+              <div style={styles.bagAccLabel}>On target</div>
+            </div>
+          </div>
+        );
+      })}
+      <div style={{ fontSize: 11, color: "#555", marginTop: 12, textAlign: "center" }}>📡 = GPS-measured average</div>
+    </div>
+  );
+}
+
+function HandicapView({ rounds, handicapIndex }) {
+  const completed = rounds.filter(r => r.completed && r.course);
+  const diffs = completed.map(r => {
+    const total = r.holes.reduce((s, h) => s + (h.score || h.par), 0);
+    return { date: r.date, course: r.course.name, score: total, diff: ((total - r.course.rating) * 113 / r.course.slope).toFixed(1) };
+  });
+
+  return (
+    <div>
+      <div style={styles.hcapHero}>
+        <div style={styles.hcapHeroLabel}>USGA Handicap Index</div>
+        <div style={styles.hcapHeroValue}>{handicapIndex !== null ? handicapIndex.toFixed(1) : "—"}</div>
+        <div style={styles.hcapHeroSub}>
+          {completed.length < 3 ? `${completed.length}/3 rounds needed for index`
+            : `Best ${Math.min(Math.floor(completed.length * 0.4) + 1, 8)} of ${diffs.length} differentials`}
+        </div>
+      </div>
+      <div style={styles.usga}>
+        <div style={styles.usgaHeader}>
+          <div style={styles.usgaLogo}>USGA</div>
+          <div style={styles.usgaText}>World Handicap System</div>
+        </div>
+        <div style={styles.usgaBody}>Handicap calculated per USGA WHS using Course Rating, Slope Rating, and best differentials from posted scores.</div>
+      </div>
+      {diffs.length > 0 && (
+        <div>
+          <div style={styles.sectionTitle}>Score History</div>
+          {diffs.map((d, i) => (
+            <div key={i} style={styles.diffRow}>
+              <div>
+                <div style={styles.diffCourse}>{d.course}</div>
+                <div style={styles.diffDate}>{d.date}</div>
+              </div>
+              <div style={styles.diffRight}>
+                <div style={styles.diffScore}>{d.score}</div>
+                <div style={styles.diffVal}>{d.diff}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const styles = {
+  app: { background: "#0a0f1a", minHeight: "100vh", color: "#e8e0d0", fontFamily: "'Georgia', 'Times New Roman', serif", maxWidth: 480, margin: "0 auto" },
+  header: { background: "linear-gradient(135deg, #0e1520 0%, #141d2e 100%)", borderBottom: "1px solid #c8a96e33", padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between" },
+  headerLeft: { display: "flex", alignItems: "center", gap: 12 },
+  logo: { fontSize: 28 },
+  logoText: { fontSize: 22, fontWeight: 800, letterSpacing: 4, color: "#c8a96e", fontFamily: "Georgia, serif" },
+  logoSub: { fontSize: 10, color: "#888", letterSpacing: 2, textTransform: "uppercase" },
+  hcapBadge: { background: "#c8a96e", borderRadius: 8, padding: "6px 12px", textAlign: "center" },
+  hcapLabel: { fontSize: 9, color: "#5a3a10", letterSpacing: 2, fontWeight: 700 },
+  hcapValue: { fontSize: 20, fontWeight: 800, color: "#2a1a05" },
+  nav: { background: "#0e1520", display: "flex", borderBottom: "1px solid #1e2a3a" },
+  navBtn: { flex: 1, padding: "12px 0", background: "none", border: "none", color: "#666", fontSize: 13, letterSpacing: 1, cursor: "pointer", fontFamily: "Georgia, serif" },
+  navBtnActive: { color: "#c8a96e", borderBottom: "2px solid #c8a96e" },
+  main: { padding: "20px 16px", minHeight: "calc(100vh - 110px)" },
+  sectionHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 },
+  sectionTitle: { fontSize: 13, letterSpacing: 3, textTransform: "uppercase", color: "#c8a96e", marginBottom: 12 },
+  newRoundBtn: { background: "#c8a96e", border: "none", borderRadius: 6, padding: "8px 14px", color: "#1a0f05", fontSize: 13, fontWeight: 700, cursor: "pointer" },
+  emptyState: { textAlign: "center", padding: "60px 20px" },
+  emptyIcon: { fontSize: 48, marginBottom: 16 },
+  emptyText: { color: "#666", fontSize: 14, lineHeight: 1.6 },
+  roundCard: { background: "#0e1520", border: "1px solid #1e2a3a", borderRadius: 10, padding: "14px 16px", marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center" },
+  roundCourse: { fontSize: 15, fontWeight: 600, color: "#e8e0d0" },
+  roundDate: { fontSize: 12, color: "#666", marginTop: 2 },
+  roundCardRight: { textAlign: "right" },
+  roundScore: { fontSize: 24, fontWeight: 800, color: "#fff" },
+  roundDiff: { fontSize: 13, fontWeight: 600 },
+  roundHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, background: "#0e1520", borderRadius: 10, padding: "12px 16px" },
+  courseName: { fontSize: 15, fontWeight: 600, color: "#c8a96e" },
+  holeLabel: { fontSize: 13, color: "#888", marginTop: 2 },
+  liveScore: { textAlign: "right" },
+  liveScoreNum: { fontSize: 32, fontWeight: 800, color: "#fff" },
+  liveScoreDiff: { fontSize: 14, fontWeight: 600 },
+  holeRow: { display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 16 },
+  holeBtn: { width: 36, height: 36, borderRadius: 6, background: "#1a2030", border: "1px solid #2a3545", color: "#888", fontSize: 12, cursor: "pointer" },
+  holeBtnActive: { background: "#c8a96e", color: "#1a0f05", fontWeight: 700, border: "1px solid #c8a96e" },
+  holeBtnDone: { border: "1px solid #4caf8066", color: "#4caf80" },
+  scoreRow: { display: "flex", gap: 12, marginBottom: 20 },
+  scoreBlock: { flex: 1, background: "#0e1520", borderRadius: 10, padding: "12px 16px", border: "1px solid #1e2a3a" },
+  scoreBlockLabel: { fontSize: 11, letterSpacing: 2, color: "#888", marginBottom: 6 },
+  scoreInput: { width: "100%", background: "none", border: "none", fontSize: 32, fontWeight: 800, color: "#fff", outline: "none", fontFamily: "Georgia, serif" },
+  shotsSection: {},
+  shotsSectionHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
+  shotsSectionTitle: { fontSize: 12, letterSpacing: 2, color: "#888", textTransform: "uppercase" },
+  addShotBtn: { background: "none", border: "1px solid #c8a96e", color: "#c8a96e", borderRadius: 6, padding: "6px 12px", fontSize: 12, cursor: "pointer" },
+  shotRow: { display: "flex", alignItems: "center", gap: 10, background: "#0e1520", borderRadius: 8, padding: "10px 12px", marginBottom: 6 },
+  shotClubBadge: { width: 34, height: 34, borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: "#fff", flexShrink: 0 },
+  shotInfo: { display: "flex", gap: 8, fontSize: 13, alignItems: "center" },
+  shotShape: { color: "#e8e0d0" },
+  shotResult: { color: "#888" },
+  shotDist: { color: "#c8a96e", fontWeight: 600 },
+  shotDistGps: { color: "#4caf80" },
+  holeNav: { display: "flex", gap: 10, marginTop: 24 },
+  holeNavBtn: { flex: 1, padding: "12px 0", background: "#1a2030", border: "1px solid #2a3545", color: "#888", borderRadius: 8, cursor: "pointer", fontSize: 14 },
+  holeNavBtnNext: { flex: 2, padding: "12px 0", background: "#c8a96e", border: "none", color: "#1a0f05", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 700 },
+  modalOverlay: { position: "fixed", inset: 0, background: "#000000cc", display: "flex", alignItems: "flex-end", zIndex: 100 },
+  modal: { background: "#0e1520", borderRadius: "16px 16px 0 0", padding: "24px 20px", width: "100%", maxWidth: 480, margin: "0 auto", maxHeight: "88vh", overflowY: "auto" },
+  modalTitle: { fontSize: 18, fontWeight: 700, color: "#c8a96e", marginBottom: 18, letterSpacing: 1 },
+  courseItem: { display: "block", width: "100%", background: "#141d2e", border: "1px solid #2a3545", borderRadius: 8, padding: "12px 14px", marginBottom: 8, textAlign: "left", cursor: "pointer" },
+  courseItemName: { fontSize: 14, fontWeight: 600, color: "#e8e0d0" },
+  courseItemMeta: { fontSize: 12, color: "#666", marginTop: 2 },
+  fieldLabel: { fontSize: 11, letterSpacing: 2, color: "#888", textTransform: "uppercase", marginBottom: 8, marginTop: 16 },
+  fieldInput: { width: "100%", background: "#141d2e", border: "1px solid #2a3545", borderRadius: 8, padding: "10px 12px", color: "#e8e0d0", fontSize: 16, fontFamily: "Georgia, serif", boxSizing: "border-box" },
+  tabRow: { display: "flex", gap: 6, marginBottom: 8 },
+  tab: { flex: 1, padding: "8px 0", background: "#141d2e", border: "1px solid #2a3545", borderRadius: 8, color: "#666", fontSize: 13, cursor: "pointer" },
+  tabActive: { background: "#1a2a3a", border: "1px solid #c8a96e", color: "#c8a96e" },
+  clubGrid: { display: "flex", flexWrap: "wrap", gap: 6 },
+  clubChip: { padding: "6px 10px", background: "#1a2030", border: "1px solid #2a3545", borderRadius: 6, color: "#aaa", fontSize: 12, cursor: "pointer", fontWeight: 600 },
+  chipRow: { display: "flex", flexWrap: "wrap", gap: 6 },
+  chip: { padding: "6px 12px", background: "#1a2030", border: "1px solid #2a3545", borderRadius: 20, color: "#aaa", fontSize: 12, cursor: "pointer" },
+  chipActive: { background: "#c8a96e22", border: "1px solid #c8a96e", color: "#c8a96e" },
+  modalActions: { display: "flex", gap: 10, marginTop: 24 },
+  cancelBtn: { flex: 1, padding: "12px 0", background: "#1a2030", border: "1px solid #2a3545", color: "#888", borderRadius: 8, cursor: "pointer", fontSize: 14 },
+  confirmBtn: { flex: 2, padding: "12px 0", background: "#c8a96e", border: "none", color: "#1a0f05", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 700 },
+  scorecard: { background: "#0e1520", borderRadius: 10, overflow: "hidden", border: "1px solid #1e2a3a", marginBottom: 20 },
+  scorecardRow: { display: "grid", gridTemplateColumns: "40px repeat(9, 1fr) 44px", borderBottom: "1px solid #1a2030" },
+  scHole: { padding: "6px 4px", fontSize: 10, color: "#888", textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center", borderRight: "1px solid #1a2030" },
+  scCell: { padding: "6px 2px", fontSize: 12, color: "#ccc", textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center" },
+  scOut: { padding: "6px 4px", fontSize: 12, color: "#c8a96e", textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center", borderLeft: "1px solid #2a3545", fontWeight: 700 },
+  insightBox: { background: "linear-gradient(135deg, #0e1520, #141d2e)", border: "1px solid #c8a96e44", borderRadius: 12, padding: 18, marginTop: 8 },
+  insightHeader: { fontSize: 13, color: "#c8a96e", letterSpacing: 1, marginBottom: 12, fontWeight: 700 },
+  insightLoading: { color: "#666", fontSize: 13, fontStyle: "italic" },
+  insightText: { fontSize: 13, color: "#aaa", lineHeight: 1.8, whiteSpace: "pre-wrap" },
+  bagCard: { display: "flex", alignItems: "center", gap: 12, background: "#0e1520", borderRadius: 10, padding: "12px 14px", marginBottom: 8, border: "1px solid #1e2a3a" },
+  bagClubDot: { width: 12, height: 12, borderRadius: "50%", flexShrink: 0 },
+  bagInfo: { flex: 1 },
+  bagClubName: { fontSize: 14, fontWeight: 600, color: "#e8e0d0" },
+  bagMeta: { fontSize: 12, color: "#666", marginTop: 2 },
+  bagAccuracy: { textAlign: "right" },
+  bagAccNum: { fontSize: 20, fontWeight: 800, color: "#4caf80" },
+  bagAccLabel: { fontSize: 10, color: "#666" },
+  hcapHero: { background: "linear-gradient(135deg, #0e1520 0%, #1a1400 100%)", border: "1px solid #c8a96e44", borderRadius: 14, padding: "28px 20px", textAlign: "center", marginBottom: 20 },
+  hcapHeroLabel: { fontSize: 11, letterSpacing: 3, color: "#888", textTransform: "uppercase", marginBottom: 8 },
+  hcapHeroValue: { fontSize: 64, fontWeight: 800, color: "#c8a96e", lineHeight: 1 },
+  hcapHeroSub: { fontSize: 12, color: "#666", marginTop: 10 },
+  usga: { background: "#0e1520", border: "1px solid #1e2a3a", borderRadius: 10, padding: "14px 16px", marginBottom: 24 },
+  usgaHeader: { display: "flex", alignItems: "center", gap: 10, marginBottom: 8 },
+  usgaLogo: { background: "#002868", color: "#fff", fontWeight: 900, fontSize: 12, padding: "3px 8px", borderRadius: 4, letterSpacing: 1 },
+  usgaText: { fontSize: 12, color: "#888", letterSpacing: 1 },
+  usgaBody: { fontSize: 12, color: "#666", lineHeight: 1.6 },
+  diffRow: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 14px", background: "#0e1520", borderRadius: 8, marginBottom: 6, border: "1px solid #1a2030" },
+  diffCourse: { fontSize: 13, color: "#e8e0d0" },
+  diffDate: { fontSize: 11, color: "#666", marginTop: 2 },
+  diffRight: { textAlign: "right" },
+  diffScore: { fontSize: 18, fontWeight: 700, color: "#fff" },
+  diffVal: { fontSize: 12, color: "#c8a96e" },
+};
