@@ -22,16 +22,8 @@ const SHOT_RESULTS = ["Fairway", "Green", "Rough", "Bunker", "Penalty", "OB"];
 const SHOT_SHAPES = ["Straight", "Draw", "Fade", "Hook", "Slice", "Push", "Pull"];
 
 const SAMPLE_COURSES = [
-  { id: 6, name: "River Pines — Black", rating: 71.1, slope: 132, par: 70, location: "Johns Creek, GA", yards: 6602 },
-  { id: 7, name: "River Pines — Blue", rating: 69.4, slope: 127, par: 70, location: "Johns Creek, GA", yards: 6284 },
-  { id: 8, name: "River Pines — River", rating: 68.1, slope: 122, par: 70, location: "Johns Creek, GA", yards: 6037 },
-  { id: 9, name: "River Pines — White", rating: 71.0, slope: 114, par: 70, location: "Johns Creek, GA", yards: 5785 },
-  { id: 10, name: "River Pines — Silver", rating: 70.0, slope: 112, par: 70, location: "Johns Creek, GA", yards: 5193 },
-  { id: 1, name: "Augusta National", rating: 76.2, slope: 148, par: 72 },
-  { id: 2, name: "Pebble Beach GL", rating: 75.5, slope: 145, par: 72 },
-  { id: 3, name: "TPC Sawgrass", rating: 76.8, slope: 155, par: 72 },
-  { id: 4, name: "Pinehurst No. 2", rating: 75.4, slope: 143, par: 70 },
-  { id: 5, name: "Torrey Pines South", rating: 78.4, slope: 144, par: 72 },
+  { id: 7, name: "River Pines", tee: "Blue", rating: 69.4, slope: 127, par: 70, location: "Johns Creek, GA", yards: 6284 },
+  { id: 11, name: "St. Marlo CC", tee: "Blue", rating: 72.7, slope: 138, par: 72, location: "Duluth, GA", yards: 6500 },
 ];
 
 const INITIAL_ROUND = {
@@ -220,7 +212,12 @@ const gpsStyles = {
 
 export default function GolfTracker() {
   const [view, setView] = useState("home");
-  const [rounds, setRounds] = useState([]);
+  const [rounds, setRounds] = useState(() => {
+    try {
+      const saved = localStorage.getItem("caddie_rounds");
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
   const [activeRound, setActiveRound] = useState(null);
   const [activeHole, setActiveHole] = useState(0);
   const [showShotModal, setShowShotModal] = useState(false);
@@ -230,6 +227,11 @@ export default function GolfTracker() {
   const [aiInsight, setAiInsight] = useState("");
   const [showCourseSelect, setShowCourseSelect] = useState(false);
   const [gpsTab, setGpsTab] = useState("gps"); // gps | manual
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+
+  useEffect(() => {
+    try { localStorage.setItem("caddie_rounds", JSON.stringify(rounds)); } catch {}
+  }, [rounds]);
 
   useEffect(() => {
     if (rounds.length === 0) return;
@@ -290,6 +292,12 @@ export default function GolfTracker() {
     setActiveRound(null);
     setView("scorecard-view");
     fetchAiInsight(completed);
+  };
+
+  const deleteRound = (id) => {
+    setRounds(prev => prev.filter(r => r.id !== id));
+    setConfirmDeleteId(null);
+    if (view === "scorecard-view") setView("home");
   };
 
   const fetchAiInsight = async (round) => {
@@ -385,9 +393,10 @@ Format: 3 bullet insights + 1 "Drill:" paragraph.`;
               const total = r.holes.reduce((s, h) => s + (h.score || h.par), 0);
               const par = r.holes.reduce((s, h) => s + h.par, 0);
               const diff = total - par;
+              const isConfirming = confirmDeleteId === r.id;
               return (
                 <div key={r.id} style={styles.roundCard}>
-                  <div>
+                  <div style={{ flex: 1 }}>
                     <div style={styles.roundCourse}>{r.course?.name || "Unknown Course"}</div>
                     <div style={styles.roundDate}>{r.date}</div>
                   </div>
@@ -396,6 +405,16 @@ Format: 3 bullet insights + 1 "Drill:" paragraph.`;
                     <div style={{ ...styles.roundDiff, color: diff > 0 ? "#e05c4b" : diff < 0 ? "#4caf80" : "#aaa" }}>
                       {diff > 0 ? `+${diff}` : diff === 0 ? "E" : diff}
                     </div>
+                  </div>
+                  <div style={styles.deleteWrap}>
+                    {isConfirming ? (
+                      <div style={styles.confirmRow}>
+                        <button style={styles.confirmYes} onClick={() => deleteRound(r.id)}>Delete</button>
+                        <button style={styles.confirmNo} onClick={() => setConfirmDeleteId(null)}>Cancel</button>
+                      </div>
+                    ) : (
+                      <button style={styles.deleteBtn} onClick={() => setConfirmDeleteId(r.id)}>🗑</button>
+                    )}
                   </div>
                 </div>
               );
@@ -492,7 +511,7 @@ Format: 3 bullet insights + 1 "Drill:" paragraph.`;
             <div style={styles.modalTitle}>Select Course</div>
             {SAMPLE_COURSES.map(c => (
               <button key={c.id} style={styles.courseItem} onClick={() => startRound(c)}>
-                <div style={styles.courseItemName}>{c.name}</div>
+                <div style={styles.courseItemName}>{c.name} <span style={{ color: "#6ab0de", fontSize: 12 }}>— {c.tee} Tee</span></div>
                 <div style={styles.courseItemMeta}>
                   {c.location ? `${c.location} · ` : ""}{c.yards ? `${c.yards}y · ` : ""}Rating {c.rating} · Slope {c.slope} · Par {c.par}
                 </div>
@@ -621,6 +640,19 @@ function ScorecardView({ round, aiInsight, loading }) {
           <div style={{ ...styles.scOut, color: "#c8a96e", fontSize: 18 }}>{total - par > 0 ? `+${total - par}` : total - par === 0 ? "E" : total - par}</div>
         </div>
       </div>
+
+      {/* GHIN Post Score */}
+      <a
+        href={`https://www.ghin.com/golfer/post-score?score=${total}&course=${encodeURIComponent(round.course?.name || "")}&tee=${encodeURIComponent(round.course?.tee || "Blue")}&date=${round.date}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        style={styles.ghinBtn}
+      >
+        <span style={styles.ghinLogo}>GHIN</span>
+        <span style={styles.ghinBtnText}>Post Score to GHIN</span>
+        <span style={styles.ghinArrow}>↗</span>
+      </a>
+
       <div style={styles.insightBox}>
         <div style={styles.insightHeader}>🤖 Coach Insight</div>
         {loading ? <div style={styles.insightLoading}>Analyzing your round…</div>
@@ -750,7 +782,12 @@ const styles = {
   roundCard: { background: "#0e1520", border: "1px solid #1e2a3a", borderRadius: 10, padding: "14px 16px", marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center" },
   roundCourse: { fontSize: 15, fontWeight: 600, color: "#e8e0d0" },
   roundDate: { fontSize: 12, color: "#666", marginTop: 2 },
-  roundCardRight: { textAlign: "right" },
+  roundCardRight: { textAlign: "right", marginLeft: 8 },
+  deleteWrap: { marginLeft: 10, display: "flex", alignItems: "center" },
+  deleteBtn: { background: "none", border: "none", fontSize: 16, cursor: "pointer", opacity: 0.45, padding: "4px 6px" },
+  confirmRow: { display: "flex", flexDirection: "column", gap: 4 },
+  confirmYes: { background: "#e05c4b", border: "none", borderRadius: 5, padding: "4px 10px", color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer" },
+  confirmNo: { background: "#1a2030", border: "1px solid #2a3545", borderRadius: 5, padding: "4px 10px", color: "#888", fontSize: 11, cursor: "pointer" },
   roundScore: { fontSize: 24, fontWeight: 800, color: "#fff" },
   roundDiff: { fontSize: 13, fontWeight: 600 },
   roundHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, background: "#0e1520", borderRadius: 10, padding: "12px 16px" },
@@ -806,6 +843,10 @@ const styles = {
   scCell: { padding: "6px 2px", fontSize: 12, color: "#ccc", textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center" },
   scOut: { padding: "6px 4px", fontSize: 12, color: "#c8a96e", textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center", borderLeft: "1px solid #2a3545", fontWeight: 700 },
   insightBox: { background: "linear-gradient(135deg, #0e1520, #141d2e)", border: "1px solid #c8a96e44", borderRadius: 12, padding: 18, marginTop: 8 },
+  ghinBtn: { display: "flex", alignItems: "center", gap: 10, background: "#002868", border: "1px solid #003fa0", borderRadius: 10, padding: "14px 16px", marginBottom: 10, textDecoration: "none", cursor: "pointer" },
+  ghinLogo: { background: "#fff", color: "#002868", fontWeight: 900, fontSize: 11, padding: "2px 7px", borderRadius: 4, letterSpacing: 1, flexShrink: 0 },
+  ghinBtnText: { flex: 1, color: "#fff", fontSize: 14, fontWeight: 600 },
+  ghinArrow: { color: "#6ab0de", fontSize: 16 },
   insightHeader: { fontSize: 13, color: "#c8a96e", letterSpacing: 1, marginBottom: 12, fontWeight: 700 },
   insightLoading: { color: "#666", fontSize: 13, fontStyle: "italic" },
   insightText: { fontSize: 13, color: "#aaa", lineHeight: 1.8, whiteSpace: "pre-wrap" },
