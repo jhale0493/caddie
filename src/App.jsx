@@ -232,6 +232,7 @@ export default function GolfTracker() {
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [editingShot, setEditingShot] = useState(null); // { holeIdx, shotId }
   const [swipedShotId, setSwipedShotId] = useState(null);
+  const [viewingRound, setViewingRound] = useState(null);
 
   useEffect(() => {
     try { localStorage.setItem("caddie_rounds", JSON.stringify(rounds)); } catch {}
@@ -436,32 +437,41 @@ Format: 3 bullet insights + 1 "Drill:" paragraph.`;
               const par = r.holes.reduce((s, h) => s + h.par, 0);
               const diff = total - par;
               const isConfirming = confirmDeleteId === r.id;
+              const isViewing = viewingRound?.id === r.id;
               return (
-                <div key={r.id} style={styles.roundCard}>
-                  <div style={{ flex: 1 }}>
-                    <div style={styles.roundCourse}>{r.course?.name || "Unknown Course"}</div>
-                    <div style={styles.roundDate}>{r.date}</div>
-                  </div>
-                  <div style={styles.roundCardRight}>
-                    <div style={styles.roundScore}>{total}</div>
-                    <div style={{ ...styles.roundDiff, color: diff > 0 ? "#e05c4b" : diff < 0 ? "#4caf80" : "#aaa" }}>
-                      {diff > 0 ? `+${diff}` : diff === 0 ? "E" : diff}
+                <div key={r.id}>
+                  <div style={{ ...styles.roundCard, ...(isViewing ? styles.roundCardActive : {}) }}
+                    onClick={() => { if (!isConfirming) setViewingRound(isViewing ? null : r); }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={styles.roundCourse}>{r.course?.name || "Unknown Course"}</div>
+                      <div style={styles.roundDate}>{r.date}</div>
+                    </div>
+                    <div style={styles.roundCardRight}>
+                      <div style={styles.roundScore}>{total}</div>
+                      <div style={{ ...styles.roundDiff, color: diff > 0 ? "#e05c4b" : diff < 0 ? "#4caf80" : "#aaa" }}>
+                        {diff > 0 ? `+${diff}` : diff === 0 ? "E" : diff}
+                      </div>
+                    </div>
+                    <div style={styles.deleteWrap}>
+                      {isConfirming ? (
+                        <div style={styles.confirmRow}>
+                          <button style={styles.confirmYes} onClick={e => { e.stopPropagation(); deleteRound(r.id); }}>Delete</button>
+                          <button style={styles.confirmNo} onClick={e => { e.stopPropagation(); setConfirmDeleteId(null); }}>Cancel</button>
+                        </div>
+                      ) : (
+                        <button style={styles.deleteBtn} onClick={e => { e.stopPropagation(); setConfirmDeleteId(r.id); }}>🗑</button>
+                      )}
                     </div>
                   </div>
-                  <div style={styles.deleteWrap}>
-                    {isConfirming ? (
-                      <div style={styles.confirmRow}>
-                        <button style={styles.confirmYes} onClick={() => deleteRound(r.id)}>Delete</button>
-                        <button style={styles.confirmNo} onClick={() => setConfirmDeleteId(null)}>Cancel</button>
-                      </div>
-                    ) : (
-                      <button style={styles.deleteBtn} onClick={() => setConfirmDeleteId(r.id)}>🗑</button>
-                    )}
-                  </div>
+                  {isViewing && (
+                    <div style={styles.roundDetail}>
+                      <ScorecardView round={r} aiInsight={aiInsight} loading={loading} />
+                    </div>
+                  )}
                 </div>
               );
             })}
-            {view === "scorecard-view" && rounds[0] && (
+            {view === "scorecard-view" && rounds[0] && !viewingRound && (
               <ScorecardView round={rounds[0]} aiInsight={aiInsight} loading={loading} />
             )}
           </div>
@@ -549,6 +559,14 @@ Format: 3 bullet insights + 1 "Drill:" paragraph.`;
               </div>
             )}
 
+            {/* Sticky Hole Nav */}
+            <div style={styles.holeNavSticky}>
+              <button style={styles.holeNavBtn} disabled={activeHole === 0} onClick={() => setActiveHole(h => h - 1)}>← Prev</button>
+              {activeHole < 17
+                ? <button style={styles.holeNavBtnNext} onClick={() => setActiveHole(h => h + 1)}>Next Hole →</button>
+                : <button style={{ ...styles.holeNavBtnNext, background: "#4caf80" }} onClick={finishRound}>Finish Round ✓</button>}
+            </div>
+
             {/* Course Notes */}
             <div style={styles.notesBlock}>
               <div style={styles.stepperLabel}>Hole Notes</div>
@@ -596,13 +614,7 @@ Format: 3 bullet insights + 1 "Drill:" paragraph.`;
                 );
               })}
             </div>
-
-            <div style={styles.holeNav}>
-              <button style={styles.holeNavBtn} disabled={activeHole === 0} onClick={() => setActiveHole(h => h - 1)}>← Prev</button>
-              {activeHole < 17
-                ? <button style={styles.holeNavBtnNext} onClick={() => setActiveHole(h => h + 1)}>Next Hole →</button>
-                : <button style={{ ...styles.holeNavBtnNext, background: "#4caf80" }} onClick={finishRound}>Finish Round ✓</button>}
-            </div>
+            <div style={{ height: 80 }} />{/* spacer for sticky nav */}
           </div>
         )}
 
@@ -1120,6 +1132,9 @@ const styles = {
   shotDist: { color: "#c8a96e", fontWeight: 600 },
   shotDistGps: { color: "#4caf80" },
   holeNav: { display: "flex", gap: 10, marginTop: 24 },
+  holeNavSticky: { position: "sticky", bottom: 0, display: "flex", gap: 10, padding: "12px 0 8px", background: "linear-gradient(to bottom, transparent, #0a0f1a 30%)", zIndex: 10, marginBottom: 4 },
+  roundCardActive: { borderColor: "#c8a96e55", background: "#111820" },
+  roundDetail: { marginBottom: 8 },
   stepperBlock: { background: "#0e1520", borderRadius: 12, padding: "14px 16px", border: "1px solid #1e2a3a", marginBottom: 10 },
   stepperLabel: { fontSize: 11, letterSpacing: 2, color: "#888", textTransform: "uppercase", marginBottom: 10 },
   stepperRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 },
