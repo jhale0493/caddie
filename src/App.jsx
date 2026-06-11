@@ -34,8 +34,10 @@ const INITIAL_ROUND = {
     number: i + 1,
     par: i < 9 ? [4, 3, 5, 4, 4, 3, 4, 5, 4][i] : [4, 3, 5, 4, 4, 3, 4, 5, 4][i - 9],
     shots: [],
-    score: null,
+    score: i < 9 ? [4, 3, 5, 4, 4, 3, 4, 5, 4][i] : [4, 3, 5, 4, 4, 3, 4, 5, 4][i - 9], // default to par
     putts: 0,
+    notes: "",
+    fairwayHit: null, // true | false | null (par 3s = null)
   })),
 };
 
@@ -228,6 +230,8 @@ export default function GolfTracker() {
   const [showCourseSelect, setShowCourseSelect] = useState(false);
   const [gpsTab, setGpsTab] = useState("gps"); // gps | manual
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [editingShot, setEditingShot] = useState(null); // { holeIdx, shotId }
+  const [swipedShotId, setSwipedShotId] = useState(null);
 
   useEffect(() => {
     try { localStorage.setItem("caddie_rounds", JSON.stringify(rounds)); } catch {}
@@ -260,6 +264,7 @@ export default function GolfTracker() {
 
   const openShotModal = () => {
     setPendingShot({ club: null, distance: "", result: "Fairway", shape: "Straight", notes: "", gpsDistance: null });
+    setEditingShot(null);
     setGpsTab("gps");
     setShowShotModal(true);
   };
@@ -286,6 +291,18 @@ export default function GolfTracker() {
     setActiveRound(updated);
   };
 
+  const updateNotes = (holeIdx, notes) => {
+    const updated = JSON.parse(JSON.stringify(activeRound));
+    updated.holes[holeIdx].notes = notes;
+    setActiveRound(updated);
+  };
+
+  const updateFairway = (holeIdx, hit) => {
+    const updated = JSON.parse(JSON.stringify(activeRound));
+    updated.holes[holeIdx].fairwayHit = hit;
+    setActiveRound(updated);
+  };
+
   const finishRound = () => {
     const completed = { ...activeRound, completed: true };
     setRounds(prev => [completed, ...prev]);
@@ -298,6 +315,31 @@ export default function GolfTracker() {
     setRounds(prev => prev.filter(r => r.id !== id));
     setConfirmDeleteId(null);
     if (view === "scorecard-view") setView("home");
+  };
+
+  const deleteShot = (holeIdx, shotId) => {
+    const updated = JSON.parse(JSON.stringify(activeRound));
+    updated.holes[holeIdx].shots = updated.holes[holeIdx].shots.filter(s => s.id !== shotId);
+    setActiveRound(updated);
+    setSwipedShotId(null);
+  };
+
+  const startEditShot = (holeIdx, shot) => {
+    setPendingShot({ ...shot });
+    setEditingShot({ holeIdx, shotId: shot.id });
+    setGpsTab(shot.gpsDistance ? "gps" : "manual");
+    setSwipedShotId(null);
+    setShowShotModal(true);
+  };
+
+  const saveEditShot = () => {
+    const dist = pendingShot.gpsDistance || pendingShot.distance;
+    const updated = JSON.parse(JSON.stringify(activeRound));
+    const hole = updated.holes[editingShot.holeIdx];
+    hole.shots = hole.shots.map(s => s.id === editingShot.shotId ? { ...pendingShot, distance: String(dist) } : s);
+    setActiveRound(updated);
+    setEditingShot(null);
+    setShowShotModal(false);
   };
 
   const fetchAiInsight = async (round) => {
@@ -444,28 +486,79 @@ Format: 3 bullet insights + 1 "Drill:" paragraph.`;
             <div style={styles.holeRow}>
               {activeRound.holes.map((h, i) => (
                 <button key={i}
-                  style={{ ...styles.holeBtn, ...(i === activeHole ? styles.holeBtnActive : {}), ...(h.score ? styles.holeBtnDone : {}) }}
+                  style={{ ...styles.holeBtn, ...(i === activeHole ? styles.holeBtnActive : {}), ...(h.shots.length > 0 || h.putts > 0 || h.notes ? styles.holeBtnDone : {}) }}
                   onClick={() => setActiveHole(i)}>
                   {i + 1}
                 </button>
               ))}
             </div>
 
-            <div style={styles.scoreRow}>
-              <div style={styles.scoreBlock}>
-                <div style={styles.scoreBlockLabel}>Score</div>
-                <input type="number" min="1" max="15"
-                  value={activeRound.holes[activeHole].score || ""}
-                  onChange={e => updateScore(activeHole, e.target.value)}
-                  style={styles.scoreInput} placeholder="—" />
+            {/* Score Stepper */}
+            {(() => {
+              const hole = activeRound.holes[activeHole];
+              const score = hole.score || hole.par;
+              const diff = score - hole.par;
+              const diffLabel = diff === 0 ? "E" : diff > 0 ? `+${diff}` : String(diff);
+              const diffColor = diff < 0 ? "#4caf80" : diff > 0 ? "#e05c4b" : "#c8a96e";
+              return (
+                <div style={styles.stepperBlock}>
+                  <div style={styles.stepperLabel}>Score</div>
+                  <div style={styles.stepperRow}>
+                    <button style={styles.stepperBtn} onClick={() => updateScore(activeHole, Math.max(1, score - 1))}>−</button>
+                    <div style={styles.stepperCenter}>
+                      <span style={{ ...styles.stepperValue, color: diffColor }}>{score}</span>
+                      <span style={styles.stepperDiff}>{diffLabel}</span>
+                    </div>
+                    <button style={styles.stepperBtn} onClick={() => updateScore(activeHole, Math.min(12, score + 1))}>+</button>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Putts Stepper */}
+            {(() => {
+              const putts = activeRound.holes[activeHole].putts || 0;
+              return (
+                <div style={styles.stepperBlock}>
+                  <div style={styles.stepperLabel}>Putts</div>
+                  <div style={styles.stepperRow}>
+                    <button style={styles.stepperBtn} onClick={() => updatePutts(activeHole, Math.max(0, putts - 1))}>−</button>
+                    <div style={styles.stepperCenter}>
+                      <span style={{ ...styles.stepperValue, color: putts <= 2 ? "#4caf80" : putts >= 4 ? "#e05c4b" : "#fff" }}>{putts}</span>
+                      <span style={styles.stepperDiff}>{putts === 1 ? "1 putt" : `${putts} putts`}</span>
+                    </div>
+                    <button style={styles.stepperBtn} onClick={() => updatePutts(activeHole, Math.min(6, putts + 1))}>+</button>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Fairway Hit — only show on par 4s and 5s */}
+            {activeRound.holes[activeHole].par >= 4 && (
+              <div style={styles.fairwayBlock}>
+                <span style={styles.stepperLabel}>Fairway Hit</span>
+                <div style={styles.fairwayBtns}>
+                  {[true, false].map(val => (
+                    <button key={String(val)}
+                      style={{ ...styles.fairwayBtn, ...(activeRound.holes[activeHole].fairwayHit === val ? (val ? styles.fairwayHit : styles.fairwayMiss) : {}) }}
+                      onClick={() => updateFairway(activeHole, activeRound.holes[activeHole].fairwayHit === val ? null : val)}>
+                      {val ? "✓ Hit" : "✗ Miss"}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <div style={styles.scoreBlock}>
-                <div style={styles.scoreBlockLabel}>Putts</div>
-                <input type="number" min="0" max="6"
-                  value={activeRound.holes[activeHole].putts || ""}
-                  onChange={e => updatePutts(activeHole, e.target.value)}
-                  style={styles.scoreInput} placeholder="—" />
-              </div>
+            )}
+
+            {/* Course Notes */}
+            <div style={styles.notesBlock}>
+              <div style={styles.stepperLabel}>Hole Notes</div>
+              <textarea
+                value={activeRound.holes[activeHole].notes || ""}
+                onChange={e => updateNotes(activeHole, e.target.value)}
+                placeholder="Pin position, club notes, wind…"
+                style={styles.notesInput}
+                rows={2}
+              />
             </div>
 
             <div style={styles.shotsSection}>
@@ -473,22 +566,35 @@ Format: 3 bullet insights + 1 "Drill:" paragraph.`;
                 <span style={styles.shotsSectionTitle}>Shots ({activeRound.holes[activeHole].shots.length})</span>
                 <button style={styles.addShotBtn} onClick={openShotModal}>+ Log Shot</button>
               </div>
-              {activeRound.holes[activeHole].shots.map(s => (
-                <div key={s.id} style={styles.shotRow}>
-                  <div style={{ ...styles.shotClubBadge, background: CLUBS.find(c => c.id === s.club)?.color || "#555" }}>
-                    {CLUBS.find(c => c.id === s.club)?.abbr}
-                  </div>
-                  <div style={styles.shotInfo}>
-                    <span style={styles.shotShape}>{s.shape}</span>
-                    <span style={styles.shotResult}>{s.result}</span>
-                    {s.distance && (
-                      <span style={{ ...styles.shotDist, ...(s.gpsDistance ? styles.shotDistGps : {}) }}>
-                        {s.distance}y{s.gpsDistance ? " 📡" : ""}
-                      </span>
+              {activeRound.holes[activeHole].shots.map(s => {
+                const isOpen = swipedShotId === s.id;
+                return (
+                  <div key={s.id} style={styles.shotRowWrap}>
+                    <div style={{ ...styles.shotRow, ...(isOpen ? styles.shotRowOpen : {}) }}
+                      onClick={() => setSwipedShotId(isOpen ? null : s.id)}>
+                      <div style={{ ...styles.shotClubBadge, background: CLUBS.find(c => c.id === s.club)?.color || "#555" }}>
+                        {CLUBS.find(c => c.id === s.club)?.abbr}
+                      </div>
+                      <div style={styles.shotInfo}>
+                        <span style={styles.shotShape}>{s.shape}</span>
+                        <span style={styles.shotResult}>{s.result}</span>
+                        {s.distance && (
+                          <span style={{ ...styles.shotDist, ...(s.gpsDistance ? styles.shotDistGps : {}) }}>
+                            {s.distance}y{s.gpsDistance ? " 📡" : ""}
+                          </span>
+                        )}
+                      </div>
+                      <span style={styles.shotChevron}>{isOpen ? "✕" : "···"}</span>
+                    </div>
+                    {isOpen && (
+                      <div style={styles.shotActions}>
+                        <button style={styles.shotEditBtn} onClick={() => startEditShot(activeHole, s)}>✏️ Edit</button>
+                        <button style={styles.shotDeleteBtn} onClick={() => deleteShot(activeHole, s.id)}>🗑 Delete</button>
+                      </div>
                     )}
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             <div style={styles.holeNav}>
@@ -526,7 +632,7 @@ Format: 3 bullet insights + 1 "Drill:" paragraph.`;
       {showShotModal && (
         <div style={styles.modalOverlay} onClick={() => setShowShotModal(false)}>
           <div style={styles.modal} onClick={e => e.stopPropagation()}>
-            <div style={styles.modalTitle}>Log Shot</div>
+            <div style={styles.modalTitle}>{editingShot ? "Edit Shot" : "Log Shot"}</div>
 
             <div style={styles.fieldLabel}>Club</div>
             <div style={styles.clubGrid}>
@@ -577,7 +683,10 @@ Format: 3 bullet insights + 1 "Drill:" paragraph.`;
 
             <div style={styles.modalActions}>
               <button style={styles.cancelBtn} onClick={() => setShowShotModal(false)}>Cancel</button>
-              <button style={{ ...styles.confirmBtn, opacity: pendingShot.club ? 1 : 0.4 }} onClick={addShot}>Add Shot</button>
+              <button style={{ ...styles.confirmBtn, opacity: pendingShot.club ? 1 : 0.4 }}
+                onClick={editingShot ? saveEditShot : addShot}>
+                {editingShot ? "Save Changes" : "Add Shot"}
+              </button>
             </div>
           </div>
         </div>
@@ -594,9 +703,77 @@ function ScorecardView({ round, aiInsight, loading }) {
   const total = frontScore + backScore;
   const par = round.holes.reduce((s, h) => s + h.par, 0);
 
+  const exportCSV = () => {
+    const rows = [];
+
+    // Header info
+    rows.push(["CADDIE — Round Export"]);
+    rows.push(["Course", round.course?.name || "Unknown"]);
+    rows.push(["Tee", round.course?.tee || "—"]);
+    rows.push(["Date", round.date]);
+    rows.push(["Par", par]);
+    rows.push(["Total Score", total]);
+    rows.push(["Score vs Par", total - par > 0 ? `+${total - par}` : total - par === 0 ? "E" : String(total - par)]);
+    rows.push(["Rating", round.course?.rating || "—"]);
+    rows.push(["Slope", round.course?.slope || "—"]);
+    rows.push([]);
+
+    // Scorecard section
+    rows.push(["--- SCORECARD ---"]);
+    rows.push(["Hole", "Par", "Score", "Putts", "+/-"]);
+    round.holes.forEach(h => {
+      const score = h.score || h.par;
+      const diff = score - h.par;
+      rows.push([h.number, h.par, score, h.putts || 0, diff > 0 ? `+${diff}` : diff === 0 ? "E" : diff]);
+    });
+    rows.push(["TOTAL", par, total, round.holes.reduce((s, h) => s + (h.putts || 0), 0), total - par > 0 ? `+${total - par}` : total - par === 0 ? "E" : String(total - par)]);
+    rows.push([]);
+
+    // Shots section
+    rows.push(["--- SHOT LOG ---"]);
+    rows.push(["Hole", "Shot #", "Club", "Distance (yds)", "GPS Measured", "Result", "Shape", "Notes"]);
+    round.holes.forEach(h => {
+      if (h.shots.length === 0) {
+        rows.push([h.number, "—", "—", "—", "—", "—", "—", "—"]);
+      } else {
+        h.shots.forEach((s, i) => {
+          rows.push([
+            h.number,
+            i + 1,
+            CLUBS.find(c => c.id === s.club)?.label || s.club,
+            s.distance || "—",
+            s.gpsDistance ? "Yes" : "No",
+            s.result,
+            s.shape,
+            s.notes || "",
+          ]);
+        });
+      }
+    });
+
+    // Convert to CSV string
+    const csv = rows.map(r => r.map(cell => {
+      const val = String(cell ?? "");
+      return val.includes(",") || val.includes('"') || val.includes("\n")
+        ? `"${val.replace(/"/g, '""')}"` : val;
+    }).join(",")).join("\n");
+
+    // Trigger download
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `caddie_${(round.course?.name || "round").replace(/\s+/g, "_")}_${round.date}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div style={{ marginTop: 24 }}>
-      <div style={styles.sectionTitle}>Scorecard</div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={styles.sectionTitle} >Scorecard</div>
+        <button style={styles.exportBtn} onClick={exportCSV}>⬇ Export CSV</button>
+      </div>
       <div style={styles.scorecard}>
         <div style={styles.scorecardRow}>
           <div style={styles.scHole}>Hole</div>
@@ -641,6 +818,9 @@ function ScorecardView({ round, aiInsight, loading }) {
         </div>
       </div>
 
+      {/* Strokes Gained + Driving Accuracy */}
+      <StatsPanel round={round} />
+
       {/* GHIN Post Score */}
       <a
         href={`https://www.ghin.com/golfer/post-score?score=${total}&course=${encodeURIComponent(round.course?.name || "")}&tee=${encodeURIComponent(round.course?.tee || "Blue")}&date=${round.date}`}
@@ -662,6 +842,130 @@ function ScorecardView({ round, aiInsight, loading }) {
     </div>
   );
 }
+
+// PGA Tour averages for SG baseline (strokes to hole out from given situation)
+// Simplified model: baseline expected strokes from tee/approach/around green
+const SG_BASELINE = {
+  // Expected strokes from tee on par 4s/5s (tour avg)
+  tee: { 4: 3.99, 5: 4.68 },
+  // Expected putts from distance bands
+  putts: { 0: 1.0, 3: 1.083, 5: 1.25, 10: 1.5, 15: 1.75, 20: 1.9, 30: 2.0, 40: 2.1, 60: 2.2 },
+};
+
+function getPuttBaseline(feet) {
+  const keys = Object.keys(SG_BASELINE.putts).map(Number).sort((a,b)=>a-b);
+  for (let i = keys.length - 1; i >= 0; i--) {
+    if (feet >= keys[i]) return SG_BASELINE.putts[keys[i]];
+  }
+  return 1.0;
+}
+
+function StatsPanel({ round }) {
+  const totalPar = round.holes.reduce((s, h) => s + h.par, 0);
+  const totalScore = round.holes.reduce((s, h) => s + (h.score || h.par), 0);
+  const totalPutts = round.holes.reduce((s, h) => s + (h.putts || 0), 0);
+
+  // Driving accuracy (par 4 + par 5 fairways only)
+  const drivingHoles = round.holes.filter(h => h.par >= 4 && h.fairwayHit !== null);
+  const fairwaysHit = drivingHoles.filter(h => h.fairwayHit === true).length;
+  const drivingAcc = drivingHoles.length > 0 ? Math.round((fairwaysHit / drivingHoles.length) * 100) : null;
+
+  // GIR — approximate from shot results: last non-putt shot result = Green
+  const girHoles = round.holes.filter(h => {
+    const nonPutt = h.shots.filter(s => s.club !== "putter");
+    return nonPutt.length > 0 && nonPutt[nonPutt.length - 1].result === "Green";
+  });
+  const girPct = round.holes.some(h => h.shots.length > 0)
+    ? Math.round((girHoles.length / round.holes.length) * 100) : null;
+
+  // Strokes Gained: Putting (vs 2-putt baseline on every hole)
+  const sgPutting = round.holes.reduce((sum, h) => {
+    if (!h.putts) return sum;
+    // baseline = 2 putts per hole (simplified; real SG:P uses distance)
+    return sum + (2 - h.putts);
+  }, 0);
+
+  // Strokes Gained: Tee-to-Green (score minus putts vs par minus 2)
+  const sgTeeToGreen = round.holes.reduce((sum, h) => {
+    const score = h.score || h.par;
+    const putts = h.putts || 0;
+    const expectedTeeToGreen = h.par - 2; // par minus 2 putts
+    const actualTeeToGreen = score - putts;
+    return sum + (expectedTeeToGreen - actualTeeToGreen);
+  }, 0);
+
+  const sgTotal = sgPutting + sgTeeToGreen;
+
+  const StatRow = ({ label, value, suffix = "", color, sub }) => (
+    <div style={sgStyles.statRow}>
+      <div>
+        <div style={sgStyles.statLabel}>{label}</div>
+        {sub && <div style={sgStyles.statSub}>{sub}</div>}
+      </div>
+      <div style={{ ...sgStyles.statValue, color: color || "#fff" }}>
+        {value !== null ? `${value > 0 ? "+" : ""}${typeof value === "number" ? value.toFixed(1) : value}${suffix}` : "—"}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={sgStyles.wrap}>
+      <div style={sgStyles.title}>Round Analytics</div>
+
+      <div style={sgStyles.section}>
+        <div style={sgStyles.sectionLabel}>Strokes Gained</div>
+        <StatRow label="SG: Total" value={sgTotal} color={sgTotal >= 0 ? "#4caf80" : "#e05c4b"} sub="vs. scratch baseline" />
+        <StatRow label="SG: Putting" value={sgPutting} color={sgPutting >= 0 ? "#4caf80" : "#e05c4b"} sub="vs. 2-putt avg" />
+        <StatRow label="SG: Tee-to-Green" value={sgTeeToGreen} color={sgTeeToGreen >= 0 ? "#4caf80" : "#e05c4b"} sub="score excl. putts vs par-2" />
+      </div>
+
+      <div style={sgStyles.divider} />
+
+      <div style={sgStyles.section}>
+        <div style={sgStyles.sectionLabel}>Accuracy</div>
+        <div style={sgStyles.statRow}>
+          <div>
+            <div style={sgStyles.statLabel}>Driving Accuracy</div>
+            <div style={sgStyles.statSub}>{drivingHoles.length > 0 ? `${fairwaysHit}/${drivingHoles.length} fairways` : "Log fairway hit/miss to track"}</div>
+          </div>
+          <div style={{ ...sgStyles.statValue, color: drivingAcc >= 60 ? "#4caf80" : drivingAcc !== null ? "#f5a623" : "#555" }}>
+            {drivingAcc !== null ? `${drivingAcc}%` : "—"}
+          </div>
+        </div>
+        <div style={sgStyles.statRow}>
+          <div>
+            <div style={sgStyles.statLabel}>Greens in Regulation</div>
+            <div style={sgStyles.statSub}>{girHoles.length}/18 holes</div>
+          </div>
+          <div style={{ ...sgStyles.statValue, color: girPct >= 50 ? "#4caf80" : girPct !== null ? "#f5a623" : "#555" }}>
+            {girPct !== null ? `${girPct}%` : "—"}
+          </div>
+        </div>
+        <div style={sgStyles.statRow}>
+          <div>
+            <div style={sgStyles.statLabel}>Total Putts</div>
+            <div style={sgStyles.statSub}>avg {totalPutts > 0 ? (totalPutts / 18).toFixed(1) : "—"} per hole</div>
+          </div>
+          <div style={{ ...sgStyles.statValue, color: totalPutts > 0 && totalPutts <= 30 ? "#4caf80" : totalPutts > 36 ? "#e05c4b" : "#fff" }}>
+            {totalPutts || "—"}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const sgStyles = {
+  wrap: { background: "#0e1520", border: "1px solid #1e2a3a", borderRadius: 12, padding: "16px", marginBottom: 10 },
+  title: { fontSize: 11, letterSpacing: 3, color: "#c8a96e", textTransform: "uppercase", marginBottom: 14 },
+  section: { display: "flex", flexDirection: "column", gap: 10 },
+  sectionLabel: { fontSize: 10, letterSpacing: 2, color: "#555", textTransform: "uppercase", marginBottom: 4 },
+  statRow: { display: "flex", justifyContent: "space-between", alignItems: "center" },
+  statLabel: { fontSize: 13, color: "#e8e0d0" },
+  statSub: { fontSize: 11, color: "#555", marginTop: 1 },
+  statValue: { fontSize: 20, fontWeight: 800, minWidth: 60, textAlign: "right" },
+  divider: { borderTop: "1px solid #1e2a3a", margin: "14px 0" },
+};
 
 function BagStats({ rounds }) {
   const allShots = rounds.flatMap(r => r.holes.flatMap(h => h.shots));
@@ -816,6 +1120,26 @@ const styles = {
   shotDist: { color: "#c8a96e", fontWeight: 600 },
   shotDistGps: { color: "#4caf80" },
   holeNav: { display: "flex", gap: 10, marginTop: 24 },
+  stepperBlock: { background: "#0e1520", borderRadius: 12, padding: "14px 16px", border: "1px solid #1e2a3a", marginBottom: 10 },
+  stepperLabel: { fontSize: 11, letterSpacing: 2, color: "#888", textTransform: "uppercase", marginBottom: 10 },
+  stepperRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 },
+  stepperBtn: { width: 64, height: 64, borderRadius: 12, background: "#1a2030", border: "1px solid #2a3545", color: "#e8e0d0", fontSize: 32, fontWeight: 300, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 },
+  stepperCenter: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center" },
+  stepperValue: { fontSize: 48, fontWeight: 800, lineHeight: 1 },
+  stepperDiff: { fontSize: 13, color: "#666", marginTop: 2 },
+  shotRowWrap: { marginBottom: 6 },
+  shotRowOpen: { borderRadius: "8px 8px 0 0", borderColor: "#c8a96e55" },
+  shotActions: { display: "flex", borderRadius: "0 0 8px 8px", overflow: "hidden", border: "1px solid #c8a96e33", borderTop: "none" },
+  shotEditBtn: { flex: 1, padding: "10px 0", background: "#1a2a3a", border: "none", color: "#c8a96e", fontSize: 13, cursor: "pointer", fontFamily: "Georgia, serif" },
+  shotDeleteBtn: { flex: 1, padding: "10px 0", background: "#2a1a1a", border: "none", borderLeft: "1px solid #c8a96e33", color: "#e05c4b", fontSize: 13, cursor: "pointer", fontFamily: "Georgia, serif" },
+  shotChevron: { color: "#555", fontSize: 14, marginLeft: 8 },
+  fairwayBlock: { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#0e1520", borderRadius: 10, padding: "12px 16px", border: "1px solid #1e2a3a", marginBottom: 10 },
+  fairwayBtns: { display: "flex", gap: 8 },
+  fairwayBtn: { padding: "6px 16px", background: "#1a2030", border: "1px solid #2a3545", borderRadius: 20, color: "#666", fontSize: 13, cursor: "pointer" },
+  fairwayHit: { background: "#1a3a2a", border: "1px solid #4caf80", color: "#4caf80" },
+  fairwayMiss: { background: "#3a1a1a", border: "1px solid #e05c4b", color: "#e05c4b" },
+  notesBlock: { background: "#0e1520", borderRadius: 10, padding: "12px 16px", border: "1px solid #1e2a3a", marginBottom: 12 },
+  notesInput: { width: "100%", background: "#141d2e", border: "1px solid #2a3545", borderRadius: 8, padding: "8px 10px", color: "#e8e0d0", fontSize: 13, fontFamily: "Georgia, serif", resize: "none", marginTop: 8, boxSizing: "border-box" },
   holeNavBtn: { flex: 1, padding: "12px 0", background: "#1a2030", border: "1px solid #2a3545", color: "#888", borderRadius: 8, cursor: "pointer", fontSize: 14 },
   holeNavBtnNext: { flex: 2, padding: "12px 0", background: "#c8a96e", border: "none", color: "#1a0f05", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 700 },
   modalOverlay: { position: "fixed", inset: 0, background: "#000000cc", display: "flex", alignItems: "flex-end", zIndex: 100 },
@@ -847,6 +1171,7 @@ const styles = {
   ghinLogo: { background: "#fff", color: "#002868", fontWeight: 900, fontSize: 11, padding: "2px 7px", borderRadius: 4, letterSpacing: 1, flexShrink: 0 },
   ghinBtnText: { flex: 1, color: "#fff", fontSize: 14, fontWeight: 600 },
   ghinArrow: { color: "#6ab0de", fontSize: 16 },
+  exportBtn: { background: "none", border: "1px solid #4caf80", color: "#4caf80", borderRadius: 6, padding: "6px 12px", fontSize: 12, cursor: "pointer", letterSpacing: 0.5 },
   insightHeader: { fontSize: 13, color: "#c8a96e", letterSpacing: 1, marginBottom: 12, fontWeight: 700 },
   insightLoading: { color: "#666", fontSize: 13, fontStyle: "italic" },
   insightText: { fontSize: 13, color: "#aaa", lineHeight: 1.8, whiteSpace: "pre-wrap" },
