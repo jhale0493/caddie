@@ -103,6 +103,8 @@ function MapShotTracker({ hole, onUpdateHole }) {
   const [mapImgError, setMapImgError] = useState(false);
   const [pendingTap, setPendingTap] = useState(null); // {x, y} normalized 0-1 within map box
   const [pendingClub, setPendingClub] = useState(null);
+  const [pendingLie, setPendingLie] = useState(null);
+  const [lastConfirmedShot, setLastConfirmedShot] = useState(null);
   const [capturing, setCapturing] = useState(false);
   const mapRef = useRef(null);
 
@@ -128,18 +130,21 @@ function MapShotTracker({ hole, onUpdateHole }) {
     setPendingTap({ x, y });
   };
 
-  const confirmShotMark = async (lieType) => {
+  const confirmShotMark = async (shape) => {
     setCapturing(true);
     try {
       const pos = await getOnce();
       const prevPos = marks.length > 0 ? marks[marks.length - 1] : teePos;
       const dist = prevPos ? haversineYards(prevPos.lat, prevPos.lng, pos.lat, pos.lng) : null;
-      const newMark = { lat: pos.lat, lng: pos.lng, x: pendingTap.x, y: pendingTap.y, lieType, club: pendingClub, distance: dist, shotNum: marks.length + 1 };
+      const newMark = { lat: pos.lat, lng: pos.lng, x: pendingTap.x, y: pendingTap.y, lieType: pendingLie, club: pendingClub, shape, distance: dist, shotNum: marks.length + 1 };
       const updatedMarks = [...marks, newMark];
       setMarks(updatedMarks);
       onUpdateHole({ mapMarks: updatedMarks, score: updatedMarks.length + (hole.putts || 0) });
+      setLastConfirmedShot(newMark);
       setPendingTap(null);
       setPendingClub(null);
+      setPendingLie(null);
+      setTimeout(() => setLastConfirmedShot(null), 3500);
     } catch (e) { console.error(e); }
     setCapturing(false);
   };
@@ -200,7 +205,7 @@ function MapShotTracker({ hole, onUpdateHole }) {
             )}
           </div>
 
-          {/* Club + Lie picker for pending tap */}
+          {/* Club + Lie + Shape picker for pending tap */}
           {pendingTap && !pendingClub && (
             <div style={mapStyles.liePicker}>
               <div style={mapStyles.liePickerLabel}>What club did you hit?</div>
@@ -217,13 +222,13 @@ function MapShotTracker({ hole, onUpdateHole }) {
             </div>
           )}
 
-          {pendingTap && pendingClub && (
+          {pendingTap && pendingClub && !pendingLie && (
             <div style={mapStyles.liePicker}>
               <div style={mapStyles.liePickerLabel}>Where did it land?</div>
               <div style={mapStyles.lieChips}>
                 {["Fairway", "Rough", "Bunker", "Green", "Penalty", "OB"].map(lie => (
                   <button key={lie} style={{ ...mapStyles.lieChip, background: lieColor(lie) + "22", borderColor: lieColor(lie) }}
-                    onClick={() => confirmShotMark(lie)} disabled={capturing}>
+                    onClick={() => setPendingLie(lie)}>
                     {lie}
                   </button>
                 ))}
@@ -232,6 +237,36 @@ function MapShotTracker({ hole, onUpdateHole }) {
                 <button style={mapStyles.lieBackBtn} onClick={() => setPendingClub(null)}>← Change Club</button>
                 <button style={mapStyles.lieCancelBtn} onClick={() => { setPendingTap(null); setPendingClub(null); }}>Cancel</button>
               </div>
+            </div>
+          )}
+
+          {pendingTap && pendingClub && pendingLie && (
+            <div style={mapStyles.liePicker}>
+              <div style={mapStyles.liePickerLabel}>Shot shape?</div>
+              <div style={mapStyles.lieChips}>
+                {SHOT_SHAPES.map(shape => (
+                  <button key={shape} style={mapStyles.shapeChip}
+                    onClick={() => confirmShotMark(shape)} disabled={capturing}>
+                    {shape}
+                  </button>
+                ))}
+              </div>
+              <div style={mapStyles.liePickerRow}>
+                <button style={mapStyles.lieBackBtn} onClick={() => setPendingLie(null)}>← Change Lie</button>
+                <button style={mapStyles.lieCancelBtn} onClick={() => { setPendingTap(null); setPendingClub(null); setPendingLie(null); }}>Cancel</button>
+              </div>
+              {capturing && <div style={mapStyles.capturingNote}>Getting GPS fix…</div>}
+            </div>
+          )}
+
+          {/* Last shot confirmation toast */}
+          {lastConfirmedShot && (
+            <div style={mapStyles.shotToast}>
+              <span style={mapStyles.shotToastIcon}>✓</span>
+              <span style={mapStyles.shotToastText}>
+                {CLUBS.find(c => c.id === lastConfirmedShot.club)?.label} · {lastConfirmedShot.shape} · {lastConfirmedShot.lieType}
+                {lastConfirmedShot.distance ? ` · ${lastConfirmedShot.distance}y` : ""}
+              </span>
             </div>
           )}
 
@@ -272,14 +307,14 @@ function MapShotTracker({ hole, onUpdateHole }) {
                 <div key={i} style={mapStyles.shotListRow}>
                   <span style={{ ...mapStyles.shotListDot, background: lieColor(m.lieType) }}>{m.shotNum}</span>
                   <span style={mapStyles.shotListClub}>{CLUBS.find(c => c.id === m.club)?.abbr || "—"}</span>
-                  <span style={mapStyles.shotListText}>{m.lieType}{m.distance ? ` · ${m.distance}y` : ""}</span>
+                  <span style={mapStyles.shotListText}>{m.shape ? `${m.shape} · ` : ""}{m.lieType}{m.distance ? ` · ${m.distance}y` : ""}</span>
                   <button style={mapStyles.shotListRemove} onClick={() => removeMark(i)}>✕</button>
                 </div>
               ))}
             </div>
           )}
 
-          <button style={mapStyles.resetTeeBtn} onClick={() => { setTeePos(null); setMarks([]); setPendingTap(null); setPendingClub(null); onUpdateHole({ mapMarks: [], score: hole.par, putts: 0 }); }}>
+          <button style={mapStyles.resetTeeBtn} onClick={() => { setTeePos(null); setMarks([]); setPendingTap(null); setPendingClub(null); setPendingLie(null); onUpdateHole({ mapMarks: [], score: hole.par, putts: 0 }); }}>
             Reset Tee Position
           </button>
         </>
@@ -311,6 +346,11 @@ const mapStyles = {
   clubChip: { padding: "8px 12px", border: "1px solid", borderRadius: 8, color: "#e8e0d0", fontSize: 13, cursor: "pointer", fontFamily: "Georgia, serif", fontWeight: 600 },
   lieChips: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 },
   lieChip: { padding: "8px 14px", border: "1px solid", borderRadius: 20, color: "#e8e0d0", fontSize: 13, cursor: "pointer", fontFamily: "Georgia, serif" },
+  shapeChip: { padding: "8px 14px", border: "1px solid #2a3545", background: "#1a2030", borderRadius: 20, color: "#e8e0d0", fontSize: 13, cursor: "pointer", fontFamily: "Georgia, serif" },
+  capturingNote: { fontSize: 11, color: "#c8a96e", marginTop: 8, fontStyle: "italic" },
+  shotToast: { display: "flex", alignItems: "center", gap: 8, background: "#1a2a1a", border: "1px solid #4caf8077", borderRadius: 8, padding: "10px 14px", marginTop: 10 },
+  shotToastIcon: { color: "#4caf80", fontWeight: 700 },
+  shotToastText: { fontSize: 12, color: "#cde8d8" },
   lieCancelBtn: { background: "none", border: "1px solid #2a3545", color: "#666", borderRadius: 6, padding: "6px 14px", fontSize: 12, cursor: "pointer" },
   lieBackBtn: { background: "none", border: "1px solid #2a3545", color: "#c8a96e", borderRadius: 6, padding: "6px 14px", fontSize: 12, cursor: "pointer" },
   summary: { display: "flex", justifyContent: "space-between", background: "#0e1520", border: "1px solid #1e2a3a", borderRadius: 10, padding: "12px 8px", marginTop: 10 },
@@ -1025,7 +1065,7 @@ function ScorecardView({ round, aiInsight, loading }) {
         distance: m.distance || "—",
         gps: "Yes",
         result: m.lieType,
-        shape: "—",
+        shape: m.shape || "—",
         mode: "Map",
         notes: "",
       }));
