@@ -9,7 +9,7 @@
 4. Vercel auto-detects Vite — just click **Deploy**
 5. Your app is live at `caddie.vercel.app` (or similar)
 
-### Option B: Vercel CLI (if you have Node installed)
+### Option B: Vercel CLI
 ```bash
 npm install
 npm run dev        # test locally first
@@ -21,15 +21,30 @@ npx vercel         # deploys instantly, gives you a URL
 2. Tap the Share button (box with arrow)
 3. Scroll down → **Add to Home Screen**
 4. Name it CADDIE → Add
-5. Launches full-screen, no browser chrome
 
 ## Add to Android Home Screen
 1. Open your Vercel URL in **Chrome**
 2. Tap the 3-dot menu → **Add to Home screen**
 
 ## Features
-- Shot tracking with club, distance, result, shape
+- Shot tracking: club, distance, result, shape
 - GPS distance measurement (Haversine formula)
+- Map mode: tap-to-mark ball position with auto distance + score calculation
 - USGA World Handicap System calculation
-- River Pines Golf Course (all 5 tees) pre-loaded
+- Strokes Gained (Putting, Tee-to-Green, Total)
+- Driving accuracy & GIR tracking
+- Course notes per hole
+- River Pines, St. Marlo CC, RTJ Grand National (Links) pre-loaded
+- MyGSGA score posting deep link
+- CSV export
 - AI coach insights after each round
+
+## Note on Map Mode
+A Google Maps Static API key is already wired into `src/App.jsx`. Satellite
+imagery will load automatically once deployed. If the map ever shows a blank
+or fallback screen, check that:
+1. The Maps Static API is enabled in your Google Cloud project
+2. Billing is active on the project (required by Google even for free tier)
+3. If you added an HTTP referrer restriction on the key, it includes your
+   deployed Vercel domain (e.g. `caddie.vercel.app/*`)
+

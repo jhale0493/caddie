@@ -24,6 +24,7 @@ const SHOT_SHAPES = ["Straight", "Draw", "Fade", "Hook", "Slice", "Push", "Pull"
 const SAMPLE_COURSES = [
   { id: 7, name: "River Pines", tee: "Blue", rating: 69.4, slope: 127, par: 70, location: "Johns Creek, GA", yards: 6284 },
   { id: 11, name: "St. Marlo CC", tee: "Blue", rating: 72.7, slope: 138, par: 72, location: "Duluth, GA", yards: 6500 },
+  { id: 12, name: "RTJ Grand National — Links", tee: "Purple", rating: 76.2, slope: 141, par: 72, location: "Opelika, AL", yards: 7404 },
 ];
 
 const INITIAL_ROUND = {
@@ -94,6 +95,216 @@ function useGPS() {
 }
 
 // GPS Shot Distance Widget — embedded in the shot modal
+// MapShotTracker — tap-to-mark ball position, auto-calculates distance + score
+function MapShotTracker({ hole, onUpdateHole }) {
+  const { getOnce } = useGPS();
+  const [teePos, setTeePos] = useState(null);
+  const [marks, setMarks] = useState(hole.mapMarks || []); // [{lat, lng, lieType, club}]
+  const [mapImgError, setMapImgError] = useState(false);
+  const [pendingTap, setPendingTap] = useState(null); // {x, y} normalized 0-1 within map box
+  const [capturing, setCapturing] = useState(false);
+  const mapRef = useRef(null);
+
+  useEffect(() => {
+    setMarks(hole.mapMarks || []);
+  }, [hole.number]);
+
+  const captureTeePosition = async () => {
+    setCapturing(true);
+    try {
+      const pos = await getOnce();
+      setTeePos(pos);
+    } catch (e) { console.error(e); }
+    setCapturing(false);
+  };
+
+  // Simulate a tap-to-GPS by capturing current device GPS at moment of tap
+  // (real ball-marking needs the user standing at the ball when they tap)
+  const handleMapTap = async (e) => {
+    const rect = mapRef.current.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    setPendingTap({ x, y });
+  };
+
+  const confirmShotMark = async (lieType) => {
+    setCapturing(true);
+    try {
+      const pos = await getOnce();
+      const prevPos = marks.length > 0 ? marks[marks.length - 1] : teePos;
+      const dist = prevPos ? haversineYards(prevPos.lat, prevPos.lng, pos.lat, pos.lng) : null;
+      const newMark = { lat: pos.lat, lng: pos.lng, x: pendingTap.x, y: pendingTap.y, lieType, distance: dist, shotNum: marks.length + 1 };
+      const updatedMarks = [...marks, newMark];
+      setMarks(updatedMarks);
+      onUpdateHole({ mapMarks: updatedMarks, score: updatedMarks.length + (hole.putts || 0) });
+      setPendingTap(null);
+    } catch (e) { console.error(e); }
+    setCapturing(false);
+  };
+
+  const removeMark = (idx) => {
+    const updated = marks.filter((_, i) => i !== idx).map((m, i) => ({ ...m, shotNum: i + 1 }));
+    setMarks(updated);
+    onUpdateHole({ mapMarks: updated, score: updated.length + (hole.putts || 0) });
+  };
+
+  const totalShots = marks.length;
+  const totalDist = marks.reduce((s, m) => s + (m.distance || 0), 0);
+
+  return (
+    <div style={mapStyles.wrap}>
+      {!teePos ? (
+        <div style={mapStyles.teeCapture}>
+          <div style={mapStyles.teeCaptureText}>Stand at the tee box, then capture your starting position</div>
+          <button style={mapStyles.teeBtn} onClick={captureTeePosition} disabled={capturing}>
+            {capturing ? "Getting GPS…" : "📍 Set Tee Position"}
+          </button>
+        </div>
+      ) : (
+        <>
+          {/* Map Canvas */}
+          <div ref={mapRef} style={mapStyles.mapBox} onClick={handleMapTap}>
+            {!mapImgError ? (
+              <img
+                src={`https://maps.googleapis.com/maps/api/staticmap?center=${teePos.lat},${teePos.lng}&zoom=17&size=480x480&maptype=satellite&key=AIzaSyBaTagO6o0y9txUbyd9wdJcxzVPjJVcXWA`}
+                alt="Hole satellite view"
+                style={mapStyles.mapImg}
+                onError={() => setMapImgError(true)}
+              />
+            ) : (
+              <div style={mapStyles.mapFallback}>
+                <div style={mapStyles.mapFallbackIcon}>🛰️</div>
+                <div style={mapStyles.mapFallbackText}>Satellite view needs a Maps API key.<br />Tap anywhere below to mark your shot — distance is still calculated from real GPS.</div>
+              </div>
+            )}
+
+            {/* Tee marker */}
+            <div style={{ ...mapStyles.pin, left: "50%", top: "50%", background: "#4caf80" }}>⛳</div>
+
+            {/* Shot markers */}
+            {marks.map((m, i) => (
+              <div key={i}
+                style={{ ...mapStyles.pin, left: `${m.x * 100}%`, top: `${m.y * 100}%`, background: lieColor(m.lieType) }}
+                onClick={(e) => { e.stopPropagation(); removeMark(i); }}>
+                {m.shotNum}
+              </div>
+            ))}
+
+            {/* Pending tap marker */}
+            {pendingTap && (
+              <div style={{ ...mapStyles.pin, left: `${pendingTap.x * 100}%`, top: `${pendingTap.y * 100}%`, background: "#c8a96e", animation: "none" }}>
+                ?
+              </div>
+            )}
+          </div>
+
+          {/* Lie type picker for pending tap */}
+          {pendingTap && (
+            <div style={mapStyles.liePicker}>
+              <div style={mapStyles.liePickerLabel}>Where did it land?</div>
+              <div style={mapStyles.lieChips}>
+                {["Fairway", "Rough", "Bunker", "Green", "Penalty", "OB"].map(lie => (
+                  <button key={lie} style={{ ...mapStyles.lieChip, background: lieColor(lie) + "22", borderColor: lieColor(lie) }}
+                    onClick={() => confirmShotMark(lie)} disabled={capturing}>
+                    {lie}
+                  </button>
+                ))}
+              </div>
+              <button style={mapStyles.lieCancelBtn} onClick={() => setPendingTap(null)}>Cancel</button>
+            </div>
+          )}
+
+          {/* Shot summary */}
+          <div style={mapStyles.summary}>
+            <div style={mapStyles.summaryStat}>
+              <div style={mapStyles.summaryNum}>{totalShots}</div>
+              <div style={mapStyles.summaryLabel}>Shots</div>
+            </div>
+            <div style={mapStyles.summaryStat}>
+              <div style={mapStyles.summaryNum}>{hole.putts || 0}</div>
+              <div style={mapStyles.summaryLabel}>Putts</div>
+            </div>
+            <div style={mapStyles.summaryStat}>
+              <div style={{ ...mapStyles.summaryNum, color: "#c8a96e" }}>{totalShots + (hole.putts || 0)}</div>
+              <div style={mapStyles.summaryLabel}>Score</div>
+            </div>
+            <div style={mapStyles.summaryStat}>
+              <div style={mapStyles.summaryNum}>{totalDist || "—"}</div>
+              <div style={mapStyles.summaryLabel}>Total Yds</div>
+            </div>
+          </div>
+
+          {/* Putts stepper inline */}
+          <div style={mapStyles.puttsRow}>
+            <span style={mapStyles.puttsLabel}>Putts</span>
+            <div style={mapStyles.puttsStepper}>
+              <button style={mapStyles.puttsBtn} onClick={() => onUpdateHole({ putts: Math.max(0, (hole.putts || 0) - 1), score: totalShots + Math.max(0, (hole.putts || 0) - 1) })}>−</button>
+              <span style={mapStyles.puttsVal}>{hole.putts || 0}</span>
+              <button style={mapStyles.puttsBtn} onClick={() => onUpdateHole({ putts: (hole.putts || 0) + 1, score: totalShots + (hole.putts || 0) + 1 })}>+</button>
+            </div>
+          </div>
+
+          {/* Shot list */}
+          {marks.length > 0 && (
+            <div style={mapStyles.shotList}>
+              {marks.map((m, i) => (
+                <div key={i} style={mapStyles.shotListRow}>
+                  <span style={{ ...mapStyles.shotListDot, background: lieColor(m.lieType) }}>{m.shotNum}</span>
+                  <span style={mapStyles.shotListText}>{m.lieType}{m.distance ? ` · ${m.distance}y` : ""}</span>
+                  <button style={mapStyles.shotListRemove} onClick={() => removeMark(i)}>✕</button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <button style={mapStyles.resetTeeBtn} onClick={() => { setTeePos(null); setMarks([]); onUpdateHole({ mapMarks: [], score: hole.par, putts: 0 }); }}>
+            Reset Tee Position
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+function lieColor(lie) {
+  const colors = { Fairway: "#4caf80", Rough: "#a89858", Bunker: "#d4a843", Green: "#5a9fd4", Penalty: "#e0954b", OB: "#e05c4b" };
+  return colors[lie] || "#888";
+}
+
+const mapStyles = {
+  wrap: { marginBottom: 12 },
+  teeCapture: { background: "#0e1520", border: "1px solid #1e2a3a", borderRadius: 12, padding: "24px 20px", textAlign: "center" },
+  teeCaptureText: { fontSize: 13, color: "#888", marginBottom: 16, lineHeight: 1.6 },
+  teeBtn: { background: "#c8a96e", border: "none", borderRadius: 8, padding: "12px 24px", color: "#1a0f05", fontWeight: 700, fontSize: 14, cursor: "pointer" },
+  mapBox: { position: "relative", width: "100%", aspectRatio: "1", background: "#1a2a1a", borderRadius: 12, overflow: "hidden", border: "1px solid #2a3545", cursor: "crosshair" },
+  mapImg: { width: "100%", height: "100%", objectFit: "cover" },
+  mapFallback: { width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 20, background: "linear-gradient(135deg, #1a2a1a, #14201a)" },
+  mapFallbackIcon: { fontSize: 36, marginBottom: 10 },
+  mapFallbackText: { fontSize: 12, color: "#789078", textAlign: "center", lineHeight: 1.6 },
+  pin: { position: "absolute", width: 28, height: 28, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 700, fontSize: 12, transform: "translate(-50%, -50%)", border: "2px solid #fff", boxShadow: "0 2px 6px rgba(0,0,0,0.4)", cursor: "pointer" },
+  liePicker: { background: "#0e1520", border: "1px solid #c8a96e55", borderRadius: 10, padding: "14px", marginTop: 10 },
+  liePickerLabel: { fontSize: 12, color: "#c8a96e", marginBottom: 10, fontWeight: 600 },
+  lieChips: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 },
+  lieChip: { padding: "8px 14px", border: "1px solid", borderRadius: 20, color: "#e8e0d0", fontSize: 13, cursor: "pointer", fontFamily: "Georgia, serif" },
+  lieCancelBtn: { background: "none", border: "1px solid #2a3545", color: "#666", borderRadius: 6, padding: "6px 14px", fontSize: 12, cursor: "pointer" },
+  summary: { display: "flex", justifyContent: "space-between", background: "#0e1520", border: "1px solid #1e2a3a", borderRadius: 10, padding: "12px 8px", marginTop: 10 },
+  summaryStat: { textAlign: "center", flex: 1 },
+  summaryNum: { fontSize: 22, fontWeight: 800, color: "#fff" },
+  summaryLabel: { fontSize: 10, color: "#666", letterSpacing: 1, textTransform: "uppercase", marginTop: 2 },
+  puttsRow: { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#0e1520", border: "1px solid #1e2a3a", borderRadius: 10, padding: "10px 16px", marginTop: 8 },
+  puttsLabel: { fontSize: 12, color: "#888", letterSpacing: 1, textTransform: "uppercase" },
+  puttsStepper: { display: "flex", alignItems: "center", gap: 14 },
+  puttsBtn: { width: 32, height: 32, borderRadius: 8, background: "#1a2030", border: "1px solid #2a3545", color: "#e8e0d0", fontSize: 18, cursor: "pointer" },
+  puttsVal: { fontSize: 18, fontWeight: 700, color: "#fff", minWidth: 20, textAlign: "center" },
+  shotList: { marginTop: 8 },
+  shotListRow: { display: "flex", alignItems: "center", gap: 10, background: "#0e1520", borderRadius: 8, padding: "8px 12px", marginBottom: 4, border: "1px solid #1a2030" },
+  shotListDot: { width: 22, height: 22, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 11, fontWeight: 700, flexShrink: 0 },
+  shotListText: { flex: 1, fontSize: 12, color: "#aaa" },
+  shotListRemove: { background: "none", border: "none", color: "#666", fontSize: 13, cursor: "pointer", padding: "0 4px" },
+  resetTeeBtn: { width: "100%", marginTop: 10, background: "none", border: "1px solid #2a3545", color: "#666", borderRadius: 8, padding: "8px 0", fontSize: 12, cursor: "pointer" },
+};
+
+
 function GPSDistanceCapture({ onDistanceCaptured }) {
   const { pos, error, watching, startWatch, stopWatch, getOnce } = useGPS();
   const [phase, setPhase] = useState("idle"); // idle | waiting-start | start-set | waiting-end | done
@@ -233,6 +444,7 @@ export default function GolfTracker() {
   const [editingShot, setEditingShot] = useState(null); // { holeIdx, shotId }
   const [swipedShotId, setSwipedShotId] = useState(null);
   const [viewingRound, setViewingRound] = useState(null);
+  const [trackMode, setTrackMode] = useState("classic"); // classic | map
 
   useEffect(() => {
     try { localStorage.setItem("caddie_rounds", JSON.stringify(rounds)); } catch {}
@@ -493,6 +705,12 @@ Format: 3 bullet insights + 1 "Drill:" paragraph.`;
               </div>
             </div>
 
+            {/* Mode Toggle */}
+            <div style={styles.modeToggle}>
+              <button style={{ ...styles.modeBtn, ...(trackMode === "classic" ? styles.modeBtnActive : {}) }} onClick={() => setTrackMode("classic")}>📋 Classic</button>
+              <button style={{ ...styles.modeBtn, ...(trackMode === "map" ? styles.modeBtnActive : {}) }} onClick={() => setTrackMode("map")}>🗺️ Map</button>
+            </div>
+
             <div style={styles.holeRow}>
               {activeRound.holes.map((h, i) => (
                 <button key={i}
@@ -502,6 +720,18 @@ Format: 3 bullet insights + 1 "Drill:" paragraph.`;
                 </button>
               ))}
             </div>
+
+            {trackMode === "map" ? (
+              <MapShotTracker
+                hole={activeRound.holes[activeHole]}
+                onUpdateHole={(updates) => {
+                  const updated = JSON.parse(JSON.stringify(activeRound));
+                  Object.assign(updated.holes[activeHole], updates);
+                  setActiveRound(updated);
+                }}
+              />
+            ) : (
+              <>
 
             {/* Score Stepper */}
             {(() => {
@@ -559,14 +789,6 @@ Format: 3 bullet insights + 1 "Drill:" paragraph.`;
               </div>
             )}
 
-            {/* Sticky Hole Nav */}
-            <div style={styles.holeNavSticky}>
-              <button style={styles.holeNavBtn} disabled={activeHole === 0} onClick={() => setActiveHole(h => h - 1)}>← Prev</button>
-              {activeHole < 17
-                ? <button style={styles.holeNavBtnNext} onClick={() => setActiveHole(h => h + 1)}>Next Hole →</button>
-                : <button style={{ ...styles.holeNavBtnNext, background: "#4caf80" }} onClick={finishRound}>Finish Round ✓</button>}
-            </div>
-
             {/* Course Notes */}
             <div style={styles.notesBlock}>
               <div style={styles.stepperLabel}>Hole Notes</div>
@@ -615,6 +837,16 @@ Format: 3 bullet insights + 1 "Drill:" paragraph.`;
               })}
             </div>
             <div style={{ height: 80 }} />{/* spacer for sticky nav */}
+              </>
+            )}
+
+            {/* Sticky Hole Nav — shows in both modes */}
+            <div style={styles.holeNavSticky}>
+              <button style={styles.holeNavBtn} disabled={activeHole === 0} onClick={() => setActiveHole(h => h - 1)}>← Prev</button>
+              {activeHole < 17
+                ? <button style={styles.holeNavBtnNext} onClick={() => setActiveHole(h => h + 1)}>Next Hole →</button>
+                : <button style={{ ...styles.holeNavBtnNext, background: "#4caf80" }} onClick={finishRound}>Finish Round ✓</button>}
+            </div>
           </div>
         )}
 
@@ -833,17 +1065,26 @@ function ScorecardView({ round, aiInsight, loading }) {
       {/* Strokes Gained + Driving Accuracy */}
       <StatsPanel round={round} />
 
-      {/* GHIN Post Score */}
-      <a
-        href={`https://www.ghin.com/golfer/post-score?score=${total}&course=${encodeURIComponent(round.course?.name || "")}&tee=${encodeURIComponent(round.course?.tee || "Blue")}&date=${round.date}`}
-        target="_blank"
-        rel="noopener noreferrer"
-        style={styles.ghinBtn}
-      >
-        <span style={styles.ghinLogo}>GHIN</span>
-        <span style={styles.ghinBtnText}>Post Score to GHIN</span>
+      {/* MyGSGA Post Score */}
+      <div style={styles.ghinBtn} onClick={() => {
+        // Try to open MyGSGA app, fall back to GSGA score posting page
+        const webUrl = "https://host.gsga.org/handicapping/post-a-score/";
+        const appUrl = "mygsga://postscore";
+        const fallback = setTimeout(() => { window.open(webUrl, "_blank"); }, 600);
+        const iframe = document.createElement("iframe");
+        iframe.style.display = "none";
+        iframe.src = appUrl;
+        document.body.appendChild(iframe);
+        setTimeout(() => { document.body.removeChild(iframe); clearTimeout(fallback); }, 2000);
+        try { window.location = appUrl; } catch(e) {}
+      }}>
+        <span style={styles.ghinLogo}>GSGA</span>
+        <div style={{ flex: 1 }}>
+          <div style={styles.ghinBtnText}>Post Score to MyGSGA</div>
+          <div style={styles.ghinBtnSub}>Opens MyGSGA app · falls back to gsga.org</div>
+        </div>
         <span style={styles.ghinArrow}>↗</span>
-      </a>
+      </div>
 
       <div style={styles.insightBox}>
         <div style={styles.insightHeader}>🤖 Coach Insight</div>
@@ -1113,6 +1354,9 @@ const styles = {
   liveScoreNum: { fontSize: 32, fontWeight: 800, color: "#fff" },
   liveScoreDiff: { fontSize: 14, fontWeight: 600 },
   holeRow: { display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 16 },
+  modeToggle: { display: "flex", gap: 8, marginBottom: 14 },
+  modeBtn: { flex: 1, padding: "10px 0", background: "#0e1520", border: "1px solid #1e2a3a", borderRadius: 8, color: "#666", fontSize: 13, cursor: "pointer", fontFamily: "Georgia, serif" },
+  modeBtnActive: { background: "#1a2a1a", border: "1px solid #4caf8077", color: "#4caf80", fontWeight: 600 },
   holeBtn: { width: 36, height: 36, borderRadius: 6, background: "#1a2030", border: "1px solid #2a3545", color: "#888", fontSize: 12, cursor: "pointer" },
   holeBtnActive: { background: "#c8a96e", color: "#1a0f05", fontWeight: 700, border: "1px solid #c8a96e" },
   holeBtnDone: { border: "1px solid #4caf8066", color: "#4caf80" },
@@ -1182,9 +1426,10 @@ const styles = {
   scCell: { padding: "6px 2px", fontSize: 12, color: "#ccc", textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center" },
   scOut: { padding: "6px 4px", fontSize: 12, color: "#c8a96e", textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center", borderLeft: "1px solid #2a3545", fontWeight: 700 },
   insightBox: { background: "linear-gradient(135deg, #0e1520, #141d2e)", border: "1px solid #c8a96e44", borderRadius: 12, padding: 18, marginTop: 8 },
-  ghinBtn: { display: "flex", alignItems: "center", gap: 10, background: "#002868", border: "1px solid #003fa0", borderRadius: 10, padding: "14px 16px", marginBottom: 10, textDecoration: "none", cursor: "pointer" },
+  ghinBtn: { display: "flex", alignItems: "center", gap: 10, background: "#002868", border: "1px solid #003fa0", borderRadius: 10, padding: "14px 16px", marginBottom: 10, cursor: "pointer" },
   ghinLogo: { background: "#fff", color: "#002868", fontWeight: 900, fontSize: 11, padding: "2px 7px", borderRadius: 4, letterSpacing: 1, flexShrink: 0 },
-  ghinBtnText: { flex: 1, color: "#fff", fontSize: 14, fontWeight: 600 },
+  ghinBtnText: { color: "#fff", fontSize: 14, fontWeight: 600 },
+  ghinBtnSub: { color: "#6ab0de", fontSize: 11, marginTop: 2 },
   ghinArrow: { color: "#6ab0de", fontSize: 16 },
   exportBtn: { background: "none", border: "1px solid #4caf80", color: "#4caf80", borderRadius: 6, padding: "6px 12px", fontSize: 12, cursor: "pointer", letterSpacing: 0.5 },
   insightHeader: { fontSize: 13, color: "#c8a96e", letterSpacing: 1, marginBottom: 12, fontWeight: 700 },
