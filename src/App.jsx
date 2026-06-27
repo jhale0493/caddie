@@ -588,13 +588,18 @@ export default function GolfTracker() {
     try {
       const totalScore = round.holes.reduce((s, h) => s + (h.score || h.par), 0);
       const totalPar = round.holes.reduce((s, h) => s + h.par, 0);
+      const allShotsByHole = round.holes.map(h => [
+        ...(h.shots || []),
+        ...(h.mapMarks || []).map(m => ({ club: m.club, result: m.lieType, gpsDistance: m.distance })),
+      ]);
       const clubUsage = {};
-      round.holes.forEach(h => h.shots.forEach(s => { clubUsage[s.club] = (clubUsage[s.club] || 0) + 1; }));
+      allShotsByHole.forEach(shots => shots.forEach(s => { if (s.club) clubUsage[s.club] = (clubUsage[s.club] || 0) + 1; }));
       const shotResults = {};
-      round.holes.forEach(h => h.shots.forEach(s => { shotResults[s.result] = (shotResults[s.result] || 0) + 1; }));
-      const gpsShots = round.holes.flatMap(h => h.shots.filter(s => s.gpsDistance));
+      allShotsByHole.forEach(shots => shots.forEach(s => { if (s.result) shotResults[s.result] = (shotResults[s.result] || 0) + 1; }));
+      const gpsShots = allShotsByHole.flat().filter(s => s.gpsDistance);
       const avgGpsByClub = {};
       gpsShots.forEach(s => {
+        if (!s.club) return;
         if (!avgGpsByClub[s.club]) avgGpsByClub[s.club] = [];
         avgGpsByClub[s.club].push(s.gpsDistance);
       });
@@ -1000,24 +1005,37 @@ function ScorecardView({ round, aiInsight, loading }) {
     rows.push(["TOTAL", par, total, round.holes.reduce((s, h) => s + (h.putts || 0), 0), total - par > 0 ? `+${total - par}` : total - par === 0 ? "E" : String(total - par)]);
     rows.push([]);
 
-    // Shots section
+    // Shots section — merges Classic mode shots and Map mode marks
     rows.push(["--- SHOT LOG ---"]);
-    rows.push(["Hole", "Shot #", "Club", "Distance (yds)", "GPS Measured", "Result", "Shape", "Notes"]);
+    rows.push(["Hole", "Shot #", "Club", "Distance (yds)", "GPS Measured", "Result", "Shape", "Mode", "Notes"]);
     round.holes.forEach(h => {
-      if (h.shots.length === 0) {
-        rows.push([h.number, "—", "—", "—", "—", "—", "—", "—"]);
+      const classicShots = (h.shots || []).map((s, i) => ({
+        shotNum: i + 1,
+        club: CLUBS.find(c => c.id === s.club)?.label || s.club,
+        distance: s.distance || "—",
+        gps: s.gpsDistance ? "Yes" : "No",
+        result: s.result,
+        shape: s.shape || "—",
+        mode: "Classic",
+        notes: s.notes || "",
+      }));
+      const mapShots = (h.mapMarks || []).map(m => ({
+        shotNum: m.shotNum,
+        club: CLUBS.find(c => c.id === m.club)?.label || m.club || "—",
+        distance: m.distance || "—",
+        gps: "Yes",
+        result: m.lieType,
+        shape: "—",
+        mode: "Map",
+        notes: "",
+      }));
+      const allShots = [...classicShots, ...mapShots];
+
+      if (allShots.length === 0) {
+        rows.push([h.number, "—", "—", "—", "—", "—", "—", "—", "—"]);
       } else {
-        h.shots.forEach((s, i) => {
-          rows.push([
-            h.number,
-            i + 1,
-            CLUBS.find(c => c.id === s.club)?.label || s.club,
-            s.distance || "—",
-            s.gpsDistance ? "Yes" : "No",
-            s.result,
-            s.shape,
-            s.notes || "",
-          ]);
+        allShots.forEach(s => {
+          rows.push([h.number, s.shotNum, s.club, s.distance, s.gps, s.result, s.shape, s.mode, s.notes]);
         });
       }
     });
@@ -1152,10 +1170,14 @@ function StatsPanel({ round }) {
 
   // GIR — approximate from shot results: last non-putt shot result = Green
   const girHoles = round.holes.filter(h => {
-    const nonPutt = h.shots.filter(s => s.club !== "putter");
+    const merged = [
+      ...(h.shots || []).map(s => ({ club: s.club, result: s.result })),
+      ...(h.mapMarks || []).map(m => ({ club: m.club, result: m.lieType })),
+    ];
+    const nonPutt = merged.filter(s => s.club !== "putter");
     return nonPutt.length > 0 && nonPutt[nonPutt.length - 1].result === "Green";
   });
-  const girPct = round.holes.some(h => h.shots.length > 0)
+  const girPct = round.holes.some(h => (h.shots?.length > 0) || (h.mapMarks?.length > 0))
     ? Math.round((girHoles.length / round.holes.length) * 100) : null;
 
   // Strokes Gained: Putting (vs 2-putt baseline on every hole)
@@ -1248,7 +1270,10 @@ const sgStyles = {
 };
 
 function BagStats({ rounds }) {
-  const allShots = rounds.flatMap(r => r.holes.flatMap(h => h.shots));
+  const allShots = rounds.flatMap(r => r.holes.flatMap(h => [
+    ...(h.shots || []),
+    ...(h.mapMarks || []).map(m => ({ club: m.club, distance: m.distance, gpsDistance: m.distance, result: m.lieType })),
+  ])).filter(s => s.club);
   const byClub = {};
   allShots.forEach(s => {
     if (!byClub[s.club]) byClub[s.club] = { count: 0, distances: [], gpsDistances: [], results: {} };
