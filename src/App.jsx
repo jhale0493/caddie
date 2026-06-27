@@ -102,6 +102,7 @@ function MapShotTracker({ hole, onUpdateHole }) {
   const [marks, setMarks] = useState(hole.mapMarks || []); // [{lat, lng, lieType, club}]
   const [mapImgError, setMapImgError] = useState(false);
   const [pendingTap, setPendingTap] = useState(null); // {x, y} normalized 0-1 within map box
+  const [pendingClub, setPendingClub] = useState(null);
   const [capturing, setCapturing] = useState(false);
   const mapRef = useRef(null);
 
@@ -133,11 +134,12 @@ function MapShotTracker({ hole, onUpdateHole }) {
       const pos = await getOnce();
       const prevPos = marks.length > 0 ? marks[marks.length - 1] : teePos;
       const dist = prevPos ? haversineYards(prevPos.lat, prevPos.lng, pos.lat, pos.lng) : null;
-      const newMark = { lat: pos.lat, lng: pos.lng, x: pendingTap.x, y: pendingTap.y, lieType, distance: dist, shotNum: marks.length + 1 };
+      const newMark = { lat: pos.lat, lng: pos.lng, x: pendingTap.x, y: pendingTap.y, lieType, club: pendingClub, distance: dist, shotNum: marks.length + 1 };
       const updatedMarks = [...marks, newMark];
       setMarks(updatedMarks);
       onUpdateHole({ mapMarks: updatedMarks, score: updatedMarks.length + (hole.putts || 0) });
       setPendingTap(null);
+      setPendingClub(null);
     } catch (e) { console.error(e); }
     setCapturing(false);
   };
@@ -186,7 +188,7 @@ function MapShotTracker({ hole, onUpdateHole }) {
               <div key={i}
                 style={{ ...mapStyles.pin, left: `${m.x * 100}%`, top: `${m.y * 100}%`, background: lieColor(m.lieType) }}
                 onClick={(e) => { e.stopPropagation(); removeMark(i); }}>
-                {m.shotNum}
+                {CLUBS.find(c => c.id === m.club)?.abbr || m.shotNum}
               </div>
             ))}
 
@@ -198,8 +200,24 @@ function MapShotTracker({ hole, onUpdateHole }) {
             )}
           </div>
 
-          {/* Lie type picker for pending tap */}
-          {pendingTap && (
+          {/* Club + Lie picker for pending tap */}
+          {pendingTap && !pendingClub && (
+            <div style={mapStyles.liePicker}>
+              <div style={mapStyles.liePickerLabel}>What club did you hit?</div>
+              <div style={mapStyles.clubGrid}>
+                {CLUBS.map(c => (
+                  <button key={c.id}
+                    style={{ ...mapStyles.clubChip, background: c.color + "22", borderColor: c.color }}
+                    onClick={() => setPendingClub(c.id)}>
+                    {c.abbr}
+                  </button>
+                ))}
+              </div>
+              <button style={mapStyles.lieCancelBtn} onClick={() => setPendingTap(null)}>Cancel</button>
+            </div>
+          )}
+
+          {pendingTap && pendingClub && (
             <div style={mapStyles.liePicker}>
               <div style={mapStyles.liePickerLabel}>Where did it land?</div>
               <div style={mapStyles.lieChips}>
@@ -210,7 +228,10 @@ function MapShotTracker({ hole, onUpdateHole }) {
                   </button>
                 ))}
               </div>
-              <button style={mapStyles.lieCancelBtn} onClick={() => setPendingTap(null)}>Cancel</button>
+              <div style={mapStyles.liePickerRow}>
+                <button style={mapStyles.lieBackBtn} onClick={() => setPendingClub(null)}>← Change Club</button>
+                <button style={mapStyles.lieCancelBtn} onClick={() => { setPendingTap(null); setPendingClub(null); }}>Cancel</button>
+              </div>
             </div>
           )}
 
@@ -250,6 +271,7 @@ function MapShotTracker({ hole, onUpdateHole }) {
               {marks.map((m, i) => (
                 <div key={i} style={mapStyles.shotListRow}>
                   <span style={{ ...mapStyles.shotListDot, background: lieColor(m.lieType) }}>{m.shotNum}</span>
+                  <span style={mapStyles.shotListClub}>{CLUBS.find(c => c.id === m.club)?.abbr || "—"}</span>
                   <span style={mapStyles.shotListText}>{m.lieType}{m.distance ? ` · ${m.distance}y` : ""}</span>
                   <button style={mapStyles.shotListRemove} onClick={() => removeMark(i)}>✕</button>
                 </div>
@@ -257,7 +279,7 @@ function MapShotTracker({ hole, onUpdateHole }) {
             </div>
           )}
 
-          <button style={mapStyles.resetTeeBtn} onClick={() => { setTeePos(null); setMarks([]); onUpdateHole({ mapMarks: [], score: hole.par, putts: 0 }); }}>
+          <button style={mapStyles.resetTeeBtn} onClick={() => { setTeePos(null); setMarks([]); setPendingTap(null); setPendingClub(null); onUpdateHole({ mapMarks: [], score: hole.par, putts: 0 }); }}>
             Reset Tee Position
           </button>
         </>
@@ -284,9 +306,13 @@ const mapStyles = {
   pin: { position: "absolute", width: 28, height: 28, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 700, fontSize: 12, transform: "translate(-50%, -50%)", border: "2px solid #fff", boxShadow: "0 2px 6px rgba(0,0,0,0.4)", cursor: "pointer" },
   liePicker: { background: "#0e1520", border: "1px solid #c8a96e55", borderRadius: 10, padding: "14px", marginTop: 10 },
   liePickerLabel: { fontSize: 12, color: "#c8a96e", marginBottom: 10, fontWeight: 600 },
+  liePickerRow: { display: "flex", gap: 8 },
+  clubGrid: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 },
+  clubChip: { padding: "8px 12px", border: "1px solid", borderRadius: 8, color: "#e8e0d0", fontSize: 13, cursor: "pointer", fontFamily: "Georgia, serif", fontWeight: 600 },
   lieChips: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 },
   lieChip: { padding: "8px 14px", border: "1px solid", borderRadius: 20, color: "#e8e0d0", fontSize: 13, cursor: "pointer", fontFamily: "Georgia, serif" },
   lieCancelBtn: { background: "none", border: "1px solid #2a3545", color: "#666", borderRadius: 6, padding: "6px 14px", fontSize: 12, cursor: "pointer" },
+  lieBackBtn: { background: "none", border: "1px solid #2a3545", color: "#c8a96e", borderRadius: 6, padding: "6px 14px", fontSize: 12, cursor: "pointer" },
   summary: { display: "flex", justifyContent: "space-between", background: "#0e1520", border: "1px solid #1e2a3a", borderRadius: 10, padding: "12px 8px", marginTop: 10 },
   summaryStat: { textAlign: "center", flex: 1 },
   summaryNum: { fontSize: 22, fontWeight: 800, color: "#fff" },
@@ -299,6 +325,7 @@ const mapStyles = {
   shotList: { marginTop: 8 },
   shotListRow: { display: "flex", alignItems: "center", gap: 10, background: "#0e1520", borderRadius: 8, padding: "8px 12px", marginBottom: 4, border: "1px solid #1a2030" },
   shotListDot: { width: 22, height: 22, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 11, fontWeight: 700, flexShrink: 0 },
+  shotListClub: { fontSize: 11, color: "#c8a96e", fontWeight: 700, minWidth: 24 },
   shotListText: { flex: 1, fontSize: 12, color: "#aaa" },
   shotListRemove: { background: "none", border: "none", color: "#666", fontSize: 13, cursor: "pointer", padding: "0 4px" },
   resetTeeBtn: { width: "100%", marginTop: 10, background: "none", border: "1px solid #2a3545", color: "#666", borderRadius: 8, padding: "8px 0", fontSize: 12, cursor: "pointer" },
