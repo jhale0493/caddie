@@ -42,6 +42,56 @@ const INITIAL_ROUND = {
   })),
 };
 
+// Generates 18 hole pars that sum to a target total par, using a standard-feel distribution
+function generateHolePars(totalPar, holeCount = 18) {
+  // Special case: a true par-3 course — every hole is par 3
+  if (totalPar === holeCount * 3) {
+    return Array(holeCount).fill(3);
+  }
+
+  const basePattern18 = [4, 3, 5, 4, 4, 3, 4, 5, 4, 4, 3, 5, 4, 4, 3, 4, 5, 4]; // sums to 72
+  const basePattern9 = [4, 3, 5, 4, 4, 3, 4, 5, 4]; // sums to 36
+  const basePattern = holeCount === 9 ? basePattern9 : basePattern18;
+  const baseTotal = basePattern.reduce((a, b) => a + b, 0);
+  let diff = totalPar - baseTotal;
+  const pars = [...basePattern];
+  const adjustableIdx = pars.map((p, i) => i).filter(i => pars[i] === 4);
+  let idx = 0;
+  while (diff !== 0 && idx < adjustableIdx.length * 4) {
+    const hole = adjustableIdx[idx % adjustableIdx.length];
+    if (diff > 0 && pars[hole] < 5) { pars[hole]++; diff--; }
+    else if (diff < 0 && pars[hole] > 3) { pars[hole]--; diff++; }
+    idx++;
+  }
+  // If still off (e.g. extreme totals), clamp remaining diff onto first/last hole within 3-5 range
+  if (diff !== 0) {
+    for (let i = 0; i < pars.length && diff !== 0; i++) {
+      if (diff > 0 && pars[i] < 5) { pars[i]++; diff--; }
+      else if (diff < 0 && pars[i] > 3) { pars[i]--; diff++; }
+    }
+  }
+  return pars;
+}
+
+function buildRoundForCourse(course) {
+  const holeCount = course?.holeCount || 18;
+  const pars = generateHolePars(course?.par || (holeCount === 9 ? 36 : 72), holeCount);
+  return {
+    course,
+    date: new Date().toISOString().split("T")[0],
+    completed: false,
+    holes: pars.map((par, i) => ({
+      number: i + 1,
+      par,
+      shots: [],
+      score: par, // default to par
+      putts: 0,
+      notes: "",
+      fairwayHit: null,
+    })),
+  };
+}
+
 // Haversine formula — returns distance in yards between two lat/lng coords
 function haversineYards(lat1, lon1, lat2, lon2) {
   const R = 6371000; // meters
@@ -506,12 +556,24 @@ export default function GolfTracker() {
   const [loading, setLoading] = useState(false);
   const [aiInsight, setAiInsight] = useState("");
   const [showCourseSelect, setShowCourseSelect] = useState(false);
+  const [customCourses, setCustomCourses] = useState(() => {
+    try {
+      const saved = localStorage.getItem("caddie_custom_courses");
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
+  const [showAddCourse, setShowAddCourse] = useState(false);
+  const [newCourse, setNewCourse] = useState({ name: "", tee: "", holeCount: "18", par: "72", par3: false, rating: "", slope: "", location: "", yards: "" });
   const [gpsTab, setGpsTab] = useState("gps"); // gps | manual
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [editingShot, setEditingShot] = useState(null); // { holeIdx, shotId }
   const [swipedShotId, setSwipedShotId] = useState(null);
   const [viewingRound, setViewingRound] = useState(null);
   const [trackMode, setTrackMode] = useState("classic"); // classic | map
+
+  useEffect(() => {
+    try { localStorage.setItem("caddie_custom_courses", JSON.stringify(customCourses)); } catch {}
+  }, [customCourses]);
 
   useEffect(() => {
     try { localStorage.setItem("caddie_rounds", JSON.stringify(rounds)); } catch {}
@@ -535,11 +597,43 @@ export default function GolfTracker() {
   }, [rounds]);
 
   const startRound = (course) => {
-    const round = { ...JSON.parse(JSON.stringify(INITIAL_ROUND)), id: Date.now(), course, completed: false };
+    const round = { ...buildRoundForCourse(course), id: Date.now() };
     setActiveRound(round);
     setActiveHole(0);
     setShowCourseSelect(false);
     setView("round");
+  };
+
+  const saveCustomCourse = () => {
+    if (!newCourse.name.trim()) return;
+    const holeCount = parseInt(newCourse.holeCount) || 18;
+    const par = newCourse.par3
+      ? holeCount * 3
+      : (parseInt(newCourse.par) || (holeCount === 9 ? 36 : 72));
+    // Default rating/slope to scratch (= par) when not provided, so handicap math still works
+    const rating = newCourse.rating ? parseFloat(newCourse.rating) : par - 0.5;
+    const slope = newCourse.slope ? parseInt(newCourse.slope) : 113; // 113 = USGA standard/neutral slope
+    const course = {
+      id: `custom_${Date.now()}`,
+      name: newCourse.name.trim(),
+      tee: newCourse.tee.trim() || "—",
+      holeCount,
+      par,
+      par3: newCourse.par3,
+      rating,
+      slope,
+      location: newCourse.location.trim() || undefined,
+      yards: newCourse.yards ? parseInt(newCourse.yards) : undefined,
+      isCustom: true,
+    };
+    setCustomCourses(prev => [course, ...prev]);
+    setNewCourse({ name: "", tee: "", holeCount: "18", par: "72", par3: false, rating: "", slope: "", location: "", yards: "" });
+    setShowAddCourse(false);
+    startRound(course);
+  };
+
+  const deleteCustomCourse = (id) => {
+    setCustomCourses(prev => prev.filter(c => c.id !== id));
   };
 
   const openShotModal = () => {
@@ -915,7 +1009,7 @@ Format: 3 bullet insights + 1 "Drill:" paragraph.`;
             {/* Sticky Hole Nav — shows in both modes */}
             <div style={styles.holeNavSticky}>
               <button style={styles.holeNavBtn} disabled={activeHole === 0} onClick={() => setActiveHole(h => h - 1)}>← Prev</button>
-              {activeHole < 17
+              {activeHole < activeRound.holes.length - 1
                 ? <button style={styles.holeNavBtnNext} onClick={() => setActiveHole(h => h + 1)}>Next Hole →</button>
                 : <button style={{ ...styles.holeNavBtnNext, background: "#4caf80" }} onClick={finishRound}>Finish Round ✓</button>}
             </div>
@@ -931,6 +1025,33 @@ Format: 3 bullet insights + 1 "Drill:" paragraph.`;
         <div style={styles.modalOverlay} onClick={() => setShowCourseSelect(false)}>
           <div style={styles.modal} onClick={e => e.stopPropagation()}>
             <div style={styles.modalTitle}>Select Course</div>
+
+            <button style={styles.addCourseBtn} onClick={() => { setShowAddCourse(true); }}>
+              ＋ Add Custom Course
+            </button>
+
+            {customCourses.length > 0 && (
+              <>
+                <div style={styles.courseSectionLabel}>Your Courses</div>
+                {customCourses.map(c => (
+                  <div key={c.id} style={styles.courseItemRow}>
+                    <button style={styles.courseItemFlex} onClick={() => startRound(c)}>
+                      <div style={styles.courseItemName}>
+                        {c.name} {c.tee !== "—" && <span style={{ color: "#6ab0de", fontSize: 12 }}>— {c.tee} Tee</span>}
+                        {c.par3 && <span style={{ color: "#4caf80", fontSize: 11, marginLeft: 6 }}>· PAR-3</span>}
+                      </div>
+                      <div style={styles.courseItemMeta}>
+                        {c.location ? `${c.location} · ` : ""}{c.yards ? `${c.yards}y · ` : ""}{c.holeCount || 18} holes · Par {c.par}
+                        {c.rating !== c.par - 0.5 || c.slope !== 113 ? ` · Rating ${c.rating} · Slope ${c.slope}` : " · No official rating"}
+                      </div>
+                    </button>
+                    <button style={styles.courseDeleteBtn} onClick={() => deleteCustomCourse(c.id)}>🗑</button>
+                  </div>
+                ))}
+                <div style={styles.courseSectionLabel}>Preset Courses</div>
+              </>
+            )}
+
             {SAMPLE_COURSES.map(c => (
               <button key={c.id} style={styles.courseItem} onClick={() => startRound(c)}>
                 <div style={styles.courseItemName}>{c.name} <span style={{ color: "#6ab0de", fontSize: 12 }}>— {c.tee} Tee</span></div>
@@ -940,6 +1061,79 @@ Format: 3 bullet insights + 1 "Drill:" paragraph.`;
               </button>
             ))}
             <button style={styles.cancelBtn} onClick={() => setShowCourseSelect(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* Add Custom Course Modal */}
+      {showAddCourse && (
+        <div style={styles.modalOverlay} onClick={() => setShowAddCourse(false)}>
+          <div style={styles.modal} onClick={e => e.stopPropagation()}>
+            <div style={styles.modalTitle}>Add Custom Course</div>
+
+            <div style={styles.fieldLabel}>Course Name *</div>
+            <input style={styles.fieldInput} placeholder="e.g. Pine Valley Muni"
+              value={newCourse.name} onChange={e => setNewCourse(p => ({ ...p, name: e.target.value }))} />
+
+            <div style={styles.fieldLabel}>Holes</div>
+            <div style={styles.holeCountToggle}>
+              {["9", "18"].map(n => (
+                <button key={n}
+                  style={{ ...styles.holeCountBtn, ...(newCourse.holeCount === n ? styles.holeCountBtnActive : {}) }}
+                  onClick={() => setNewCourse(p => ({
+                    ...p,
+                    holeCount: n,
+                    par: p.par3 ? String(parseInt(n) * 3) : (p.par === "72" || p.par === "36" ? (n === "9" ? "36" : "72") : p.par),
+                  }))}>
+                  {n} Holes
+                </button>
+              ))}
+            </div>
+
+            <button
+              style={{ ...styles.par3Toggle, ...(newCourse.par3 ? styles.par3ToggleActive : {}) }}
+              onClick={() => setNewCourse(p => ({
+                ...p,
+                par3: !p.par3,
+                par: !p.par3 ? String(parseInt(p.holeCount) * 3) : (p.holeCount === "9" ? "36" : "72"),
+              }))}>
+              {newCourse.par3 ? "✓ " : ""}Par-3 Course (every hole par 3)
+            </button>
+
+            <div style={styles.fieldLabel}>Total Par</div>
+            <input type="number" style={{ ...styles.fieldInput, opacity: newCourse.par3 ? 0.5 : 1 }}
+              placeholder={newCourse.holeCount === "9" ? "36" : "72"}
+              value={newCourse.par} disabled={newCourse.par3}
+              onChange={e => setNewCourse(p => ({ ...p, par: e.target.value }))} />
+
+            <div style={styles.fieldLabel}>Tee (optional)</div>
+            <input style={styles.fieldInput} placeholder="e.g. White, Blue"
+              value={newCourse.tee} onChange={e => setNewCourse(p => ({ ...p, tee: e.target.value }))} />
+
+            <div style={styles.fieldLabel}>Location (optional)</div>
+            <input style={styles.fieldInput} placeholder="e.g. City, State"
+              value={newCourse.location} onChange={e => setNewCourse(p => ({ ...p, location: e.target.value }))} />
+
+            <div style={styles.courseAdvancedRow}>
+              <div style={{ flex: 1 }}>
+                <div style={styles.fieldLabel}>Rating (optional)</div>
+                <input type="number" step="0.1" style={styles.fieldInput} placeholder="auto"
+                  value={newCourse.rating} onChange={e => setNewCourse(p => ({ ...p, rating: e.target.value }))} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={styles.fieldLabel}>Slope (optional)</div>
+                <input type="number" style={styles.fieldInput} placeholder="113"
+                  value={newCourse.slope} onChange={e => setNewCourse(p => ({ ...p, slope: e.target.value }))} />
+              </div>
+            </div>
+            <div style={styles.courseHint}>Leave Rating/Slope blank if you don't know them — CADDIE will use neutral defaults so the round still tracks normally. Handicap-eligible posting just won't be official without real numbers.</div>
+
+            <div style={styles.modalActions}>
+              <button style={styles.cancelBtn} onClick={() => setShowAddCourse(false)}>Cancel</button>
+              <button style={{ ...styles.confirmBtn, opacity: newCourse.name.trim() ? 1 : 0.4 }} onClick={saveCustomCourse}>
+                Save &amp; Start Round
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1122,24 +1316,28 @@ function ScorecardView({ round, aiInsight, loading }) {
           })}
           <div style={{ ...styles.scOut, fontWeight: 700 }}>{frontScore}</div>
         </div>
-        <div style={styles.scorecardRow}>
-          <div style={styles.scHole}>Hole</div>
-          {back9.map(h => <div key={h.number} style={styles.scCell}>{h.number}</div>)}
-          <div style={styles.scOut}>In</div>
-        </div>
-        <div style={styles.scorecardRow}>
-          <div style={styles.scHole}>Par</div>
-          {back9.map(h => <div key={h.number} style={styles.scCell}>{h.par}</div>)}
-          <div style={styles.scOut}>{back9.reduce((s, h) => s + h.par, 0)}</div>
-        </div>
-        <div style={{ ...styles.scorecardRow, background: "#1a2030" }}>
-          <div style={styles.scHole}>Score</div>
-          {back9.map(h => {
-            const diff = (h.score || h.par) - h.par;
-            return <div key={h.number} style={{ ...styles.scCell, color: diff < 0 ? "#4caf80" : diff > 1 ? "#e05c4b" : diff === 1 ? "#f5a623" : "#fff", fontWeight: 700 }}>{h.score || "—"}</div>;
-          })}
-          <div style={{ ...styles.scOut, fontWeight: 700 }}>{backScore}</div>
-        </div>
+        {back9.length > 0 && (
+          <>
+            <div style={styles.scorecardRow}>
+              <div style={styles.scHole}>Hole</div>
+              {back9.map(h => <div key={h.number} style={styles.scCell}>{h.number}</div>)}
+              <div style={styles.scOut}>In</div>
+            </div>
+            <div style={styles.scorecardRow}>
+              <div style={styles.scHole}>Par</div>
+              {back9.map(h => <div key={h.number} style={styles.scCell}>{h.par}</div>)}
+              <div style={styles.scOut}>{back9.reduce((s, h) => s + h.par, 0)}</div>
+            </div>
+            <div style={{ ...styles.scorecardRow, background: "#1a2030" }}>
+              <div style={styles.scHole}>Score</div>
+              {back9.map(h => {
+                const diff = (h.score || h.par) - h.par;
+                return <div key={h.number} style={{ ...styles.scCell, color: diff < 0 ? "#4caf80" : diff > 1 ? "#e05c4b" : diff === 1 ? "#f5a623" : "#fff", fontWeight: 700 }}>{h.score || "—"}</div>;
+              })}
+              <div style={{ ...styles.scOut, fontWeight: 700 }}>{backScore}</div>
+            </div>
+          </>
+        )}
         <div style={{ ...styles.scorecardRow, background: "#0e1520", borderTop: "2px solid #c8a96e" }}>
           <div style={{ ...styles.scHole, color: "#c8a96e" }}>Total</div>
           <div style={{ gridColumn: "span 9", textAlign: "center", fontSize: 22, fontWeight: 800, color: "#fff", padding: "8px 0" }}>{total}</div>
@@ -1277,7 +1475,7 @@ function StatsPanel({ round }) {
         <div style={sgStyles.statRow}>
           <div>
             <div style={sgStyles.statLabel}>Greens in Regulation</div>
-            <div style={sgStyles.statSub}>{girHoles.length}/18 holes</div>
+            <div style={sgStyles.statSub}>{girHoles.length}/{round.holes.length} holes</div>
           </div>
           <div style={{ ...sgStyles.statValue, color: girPct >= 50 ? "#4caf80" : girPct !== null ? "#f5a623" : "#555" }}>
             {girPct !== null ? `${girPct}%` : "—"}
@@ -1286,7 +1484,7 @@ function StatsPanel({ round }) {
         <div style={sgStyles.statRow}>
           <div>
             <div style={sgStyles.statLabel}>Total Putts</div>
-            <div style={sgStyles.statSub}>avg {totalPutts > 0 ? (totalPutts / 18).toFixed(1) : "—"} per hole</div>
+            <div style={sgStyles.statSub}>avg {totalPutts > 0 ? (totalPutts / round.holes.length).toFixed(1) : "—"} per hole</div>
           </div>
           <div style={{ ...sgStyles.statValue, color: totalPutts > 0 && totalPutts <= 30 ? "#4caf80" : totalPutts > 36 ? "#e05c4b" : "#fff" }}>
             {totalPutts || "—"}
@@ -1499,6 +1697,18 @@ const styles = {
   courseItem: { display: "block", width: "100%", background: "#141d2e", border: "1px solid #2a3545", borderRadius: 8, padding: "12px 14px", marginBottom: 8, textAlign: "left", cursor: "pointer" },
   courseItemName: { fontSize: 14, fontWeight: 600, color: "#e8e0d0" },
   courseItemMeta: { fontSize: 12, color: "#666", marginTop: 2 },
+  addCourseBtn: { display: "block", width: "100%", background: "#1a2a1a", border: "1px solid #4caf8077", borderRadius: 8, padding: "12px 14px", marginBottom: 14, textAlign: "center", cursor: "pointer", color: "#4caf80", fontSize: 14, fontWeight: 700, fontFamily: "Georgia, serif" },
+  courseSectionLabel: { fontSize: 10, letterSpacing: 2, color: "#555", textTransform: "uppercase", margin: "12px 0 8px" },
+  courseItemRow: { display: "flex", gap: 8, alignItems: "stretch", marginBottom: 8 },
+  courseItemFlex: { flex: 1, display: "block", background: "#141d2e", border: "1px solid #2a3545", borderRadius: 8, padding: "12px 14px", textAlign: "left", cursor: "pointer" },
+  courseDeleteBtn: { background: "#2a1a1a", border: "1px solid #2a3545", borderRadius: 8, padding: "0 14px", color: "#e05c4b", fontSize: 14, cursor: "pointer" },
+  courseAdvancedRow: { display: "flex", gap: 10 },
+  courseHint: { fontSize: 11, color: "#666", lineHeight: 1.6, marginTop: 10, marginBottom: 4 },
+  holeCountToggle: { display: "flex", gap: 8, marginBottom: 4 },
+  holeCountBtn: { flex: 1, padding: "10px 0", background: "#141d2e", border: "1px solid #2a3545", borderRadius: 8, color: "#888", fontSize: 13, cursor: "pointer", fontFamily: "Georgia, serif" },
+  holeCountBtnActive: { background: "#1a2a3a", border: "1px solid #c8a96e", color: "#c8a96e", fontWeight: 600 },
+  par3Toggle: { display: "block", width: "100%", marginTop: 12, padding: "10px 14px", background: "#141d2e", border: "1px solid #2a3545", borderRadius: 8, color: "#888", fontSize: 13, cursor: "pointer", textAlign: "left", fontFamily: "Georgia, serif" },
+  par3ToggleActive: { background: "#1a2a3a", border: "1px solid #6ab0de", color: "#6ab0de", fontWeight: 600 },
   fieldLabel: { fontSize: 11, letterSpacing: 2, color: "#888", textTransform: "uppercase", marginBottom: 8, marginTop: 16 },
   fieldInput: { width: "100%", background: "#141d2e", border: "1px solid #2a3545", borderRadius: 8, padding: "10px 12px", color: "#e8e0d0", fontSize: 16, fontFamily: "Georgia, serif", boxSizing: "border-box" },
   tabRow: { display: "flex", gap: 6, marginBottom: 8 },
